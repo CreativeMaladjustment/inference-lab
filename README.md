@@ -20,7 +20,7 @@ Pipeline: **PDF → page images → OCR → chunking → translation → Markdow
 
 ### Requirements
 - macOS on Apple Silicon (runs on CPU elsewhere, slowly), Python 3.13 (3.14 isn't usable yet: Surya 0.17 needs Pillow<11, which has no 3.14 wheels)
-- Poppler: `brew install poppler`
+- Poppler and Pango: `brew install poppler pango` (Pango is only needed for `--to-pdf`)
 - Disk/RAM for the NLLB 1.3B model (~5 GB download, ~5 GB RAM in fp32)
 
 ### Setup
@@ -41,6 +41,8 @@ python translate_urdu_pdf.py ~/temp/pdfs-to-process --output-dir ~/temp/pdfs-tra
 ```
 Try a single file with `--first-page 1 --last-page 3` first.
 
+**Page count:** at the start of each PDF the log states `PDF has N pages` (and the range, if you used `--first-page/--last-page`), and warns if the number of pages rendered differs.
+
 **Progress:** everything is written to stdout, including the `tqdm` bars (OCR per page, translation per chunk) and one log line per OCR page, e.g. `OCR page 12: 41 lines, 7 paragraphs, 1234 chars` (with a `(no text detected)` flag for blank pages). Page numbers respect `--first-page`. Only model-download bars and library warnings still go to stderr.
 
 **Log file:** every run writes `urdu_translate-<timestamp>.log` (in `--output-dir`, or next to the PDF/folder; override with `--log-file`). It mirrors stdout **and** stderr, so it includes library warnings and tracebacks, with progress bars collapsed to their final state. The header records the command, Python/OS, device (MPS availability) and the versions of torch, transformers, surya-ocr etc., and native crashes (e.g. an MPS segfault) get a `faulthandler` traceback. A failure in one PDF is logged with its traceback and the batch carries on; the run ends with a summary and exits non-zero if anything failed. To troubleshoot, send the `.log` file.
@@ -59,6 +61,7 @@ Try a single file with `--first-page 1 --last-page 3` first.
 | `--beams` | 4 | Beam-search width |
 | `--max-input-tokens` | 256 | Truncation limit per chunk |
 | `--fp16` | off | Half-precision model (less RAM, may be less stable on MPS) |
+| `--to-pdf` | off | Also render `<pdf name>.en.pdf` from the Markdown (each source page starts a new PDF page) |
 | `--save-ocr` | off | Cache OCR as `<pdf name>.ocr.json`; reused on re-run (OCR is the slow step) |
 
 The script sets `TORCH_DEVICE=mps` and `PYTORCH_ENABLE_MPS_FALLBACK=1` before importing Surya, and places NLLB on `mps`; it falls back to CPU with a warning if MPS is unavailable.

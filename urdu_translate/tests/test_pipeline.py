@@ -281,3 +281,60 @@ def test_default_log_location(tmp_path):
     a = SimpleNamespace(output_dir=tmp_path / "o", pdf=tmp_path)
     assert t.default_log_path(a).parent == tmp_path / "o"
     assert t.default_log_path(a).name.startswith("urdu_translate-")
+
+
+def test_page_count_logged_and_mismatch_warned(tmp_path, monkeypatch, capsys):
+    pdf = tmp_path / "in.pdf"
+    pdf.write_bytes(b"x")
+    _stub_heavy(monkeypatch)
+    monkeypatch.setattr(t, "pdf_page_count", lambda p: 76)   # stub renders only 1 page
+    monkeypatch.setattr(sys, "argv", ["prog", str(pdf), "--log-file", str(tmp_path / "l.log")])
+    t.main()
+    cap = capsys.readouterr()
+    assert "PDF has 76 pages" in cap.out
+    assert "expected 76 pages but rendered 1" in cap.err
+    assert "PDF has 76 pages" in (tmp_path / "l.log").read_text(encoding="utf-8")
+
+
+def test_page_range_logged(tmp_path, monkeypatch, capsys):
+    pdf = tmp_path / "in.pdf"
+    pdf.write_bytes(b"x")
+    _stub_heavy(monkeypatch)
+    monkeypatch.setattr(t, "pdf_page_count", lambda p: 76)
+    monkeypatch.setattr(sys, "argv", ["prog", str(pdf), "--first-page", "1", "--last-page", "1",
+                                      "--log-file", str(tmp_path / "l.log")])
+    t.main()
+    assert "processing pages 1-1" in capsys.readouterr().out
+
+
+def test_page_count_unreadable_is_not_fatal(tmp_path, capsys):
+    bad = tmp_path / "bad.pdf"
+    bad.write_bytes(b"not a pdf")
+    assert t.pdf_page_count(bad) is None
+    assert "Could not read page count" in capsys.readouterr().err
+
+
+def test_markdown_to_pdf_real_render(tmp_path):
+    pytest.importorskip("weasyprint")
+    md = tmp_path / "b.en.md"
+    md.write_text(t.assemble_markdown(
+        2, 1, [t.Chunk(0, 0, "a"), t.Chunk(1, 0, "b")],
+        ["First page <b>text</b> & ā ṣ “quotes” — dash", "Second page"], "b.pdf"), encoding="utf-8")
+    out = tmp_path / "b.en.pdf"
+    t.markdown_to_pdf(md, out)
+    data = out.read_bytes()
+    assert data.startswith(b"%PDF")
+    pages = t.pdf_page_count(out)       # needs poppler; None if unavailable
+    if pages is not None:
+        assert pages == 2               # '---' between source pages => separate PDF pages
+
+
+def test_to_pdf_flag_writes_pdf_next_to_md(tmp_path, monkeypatch):
+    pdf = tmp_path / "in.pdf"
+    pdf.write_bytes(b"x")
+    _stub_heavy(monkeypatch)
+    calls = []
+    monkeypatch.setattr(t, "markdown_to_pdf", lambda md, out: calls.append((md.name, out.name)))
+    monkeypatch.setattr(sys, "argv", ["prog", str(pdf), "--to-pdf", "--log-file", str(tmp_path / "l.log")])
+    t.main()
+    assert calls == [("in.en.md", "in.en.pdf")]
