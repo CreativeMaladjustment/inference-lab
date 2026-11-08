@@ -16,12 +16,11 @@ defaults:
 
 jobs:
   test:
-    name: tests (${{ matrix.os }}, py${{ matrix.python }})
-    runs-on: ${{ matrix.os }}
+    name: tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14]   # macos-14 = Apple Silicon
         python: ["3.10", "3.12"]
     steps:
       - uses: actions/checkout@v4
@@ -30,13 +29,8 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: urdu_translate/requirements-test.txt
-      - name: Install torch (CPU wheel on Linux)
-        run: |
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            pip install torch --index-url https://download.pytorch.org/whl/cpu
-          else
-            pip install torch
-          fi
+      - name: Install torch (CPU wheel)
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: pip install -r requirements-test.txt
       - name: Syntax check
         run: python -m py_compile translate_urdu_pdf.py

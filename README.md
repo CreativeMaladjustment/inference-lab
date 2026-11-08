@@ -67,4 +67,4 @@ python -m pytest
 ```
 They cover device selection, paragraph grouping, chunking, translation ordering / forced English BOS, Markdown assembly, and the CLI end to end (including OCR caching, folder input and output naming).
 
-GitHub Actions ([`urdu-translate.yml`](.github/workflows/urdu-translate.yml)) runs them on Ubuntu and macOS (Apple Silicon), Python 3.10 and 3.12, plus a non-blocking check that `requirements.txt` resolves. CI does **not** run real Surya/NLLB inference, and hosted macOS runners have no usable MPS, so real-model and MPS behaviour must be verified locally.
+GitHub Actions ([`urdu-translate.yml`](.github/workflows/urdu-translate.yml)) runs them on Ubuntu with Python 3.10 and 3.12, plus a non-blocking check that `requirements.txt` resolves. CI does **not** run real Surya/NLLB inference or exercise MPS, so real-model and MPS behaviour must be verified locally.
