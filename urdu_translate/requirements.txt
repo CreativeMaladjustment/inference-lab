@@ -9,6 +9,7 @@
 #  * Do NOT upgrade surya-ocr past 0.17.x: v2 replaced FoundationPredictor with
 #    SuryaInferenceManager and needs a vllm/llama.cpp server; this script targets v1.
 #  * sentencepiece needs >=0.2.1 for Python 3.13 wheels (0.2.0 has none).
+# Optional --to-pdf output also needs the system library:  brew install pango
 # Run `pip check` after installing.
 torch>=2.7.0,<2.9
 surya-ocr==0.17.0
@@ -20,3 +21,5 @@ protobuf>=4.25,<6           # sentencepiece/tokenizer conversion
 accelerate>=0.34,<2
 langchain-text-splitters>=0.3,<0.4
 tqdm>=4.66
+markdown>=3.7,<4            # --to-pdf
+weasyprint>=66,<71          # --to-pdf (needs `brew install pango` on macOS)

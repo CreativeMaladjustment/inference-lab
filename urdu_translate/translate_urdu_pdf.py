@@ -61,6 +61,17 @@ def pdf_to_images(pdf_path: Path, dpi: int, first: int | None, last: int | None)
     return convert_from_path(str(pdf_path), dpi=dpi, first_page=first, last_page=last, fmt="png")
 
 
+def pdf_page_count(pdf_path: Path) -> int | None:
+    """Total pages in the PDF as reported by poppler's pdfinfo, or None if unreadable."""
+    from pdf2image import pdfinfo_from_path
+
+    try:
+        return int(pdfinfo_from_path(str(pdf_path))["Pages"])
+    except Exception as exc:  # corrupt/encrypted PDF etc.; rendering will report the real error
+        print(f"Could not read page count: {exc!r}", file=sys.stderr)
+        return None
+
+
 def load_ocr():
     # NOTE: current Surya releases are multilingual and take no language argument;
     # Urdu is handled by the model itself. (Only Surya <=0.8 used langs=["ur"].)
@@ -203,6 +214,40 @@ def assemble_markdown(num_pages: int, first_page: int, chunks: list[Chunk],
     return "\n\n".join(parts) + "\n"
 
 
+# ----------------------------------------------------------------- 5. Markdown -> PDF
+PDF_CSS = """
+@page { size: A4; margin: 2.2cm; @bottom-center { content: counter(page); font: 9pt sans-serif; color: #666; } }
+body { font-family: Georgia, 'Times New Roman', serif; font-size: 11pt; line-height: 1.5; }
+h1 { font-size: 18pt; margin: 0 0 1em; }
+h2 { font-size: 11pt; font-family: sans-serif; color: #555; border-bottom: 1px solid #bbb;
+     padding-bottom: 2pt; margin: 0 0 1em; }
+p { margin: 0 0 0.8em; text-align: left; }
+hr { border: 0; height: 0; margin: 0; page-break-after: always; }  /* '---' = new PDF page */
+"""
+
+
+def markdown_to_pdf(md_path: Path, pdf_path: Path) -> None:
+    """Render the translated Markdown to PDF; each source page starts a new PDF page."""
+    try:
+        import markdown
+        from weasyprint import CSS, HTML
+    except ImportError as exc:
+        raise RuntimeError(f"--to-pdf needs 'markdown' and 'weasyprint' ({exc}); "
+                           "run: pip install -r requirements.txt") from exc
+    except OSError as exc:  # weasyprint can't find pango/glib
+        raise RuntimeError(
+            f"WeasyPrint could not load its system libraries ({exc}). On macOS run "
+            "`brew install pango` and retry with "
+            "DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib") from exc
+
+    text = md_path.read_text(encoding="utf-8")
+    text = text.replace("&", "&amp;").replace("<", "&lt;")  # treat translated text as text, not HTML
+    body = markdown.markdown(text)
+    html = (f"<!doctype html><html><head><meta charset='utf-8'><title>{md_path.stem}</title>"
+            f"</head><body>{body}</body></html>")
+    HTML(string=html).write_pdf(str(pdf_path), stylesheets=[CSS(string=PDF_CSS)])
+
+
 # ----------------------------------------------------------------- CLI
 def parse_args():
     ap = argparse.ArgumentParser(description="Translate an Urdu PDF to English Markdown.")
@@ -220,6 +265,8 @@ def parse_args():
     ap.add_argument("--beams", type=int, default=4)
     ap.add_argument("--max-input-tokens", type=int, default=256)
     ap.add_argument("--fp16", action="store_true", help="float16 model (less RAM; may be less stable on MPS)")
+    ap.add_argument("--to-pdf", action="store_true",
+                    help="Also render the Markdown to <pdf name>.en.pdf (needs weasyprint + pango)")
     ap.add_argument("--log-file", type=Path,
                     help="Log file (default: urdu_translate-<timestamp>.log in the output folder)")
     ap.add_argument("--save-ocr", action="store_true",
@@ -331,8 +378,16 @@ def process_pdf(pdf: Path, out: Path, a, translator) -> None:
         pages = json.loads(cache.read_text(encoding="utf-8"))
         print(f"Loaded cached OCR: {len(pages)} pages")
     else:
+        total = pdf_page_count(pdf)
+        first = a.first_page or 1
+        last = min(a.last_page, total) if (a.last_page and total) else total
+        expected = (last - first + 1) if last else None
+        print(f"PDF has {total if total is not None else 'an unknown number of'} pages"
+              + (f"; processing pages {first}-{last}" if (a.first_page or a.last_page) and last else ""))
         images = pdf_to_images(pdf, a.dpi, a.first_page, a.last_page)
         print(f"Rendered {len(images)} pages at {a.dpi} DPI")
+        if expected is not None and len(images) != expected:
+            print(f"WARNING: expected {expected} pages but rendered {len(images)}", file=sys.stderr)
         pages = ocr_pdf(images, a.ocr_batch, a.first_page or 1)
         del images
         if cache:
@@ -346,6 +401,10 @@ def process_pdf(pdf: Path, out: Path, a, translator) -> None:
         assemble_markdown(len(pages), a.first_page or 1, chunks, translations, pdf.name),
         encoding="utf-8")
     print(f"Wrote {out}")
+    if a.to_pdf:
+        pdf_out = out.with_suffix(".pdf")  # book.en.md -> book.en.pdf
+        markdown_to_pdf(out, pdf_out)
+        print(f"Wrote {pdf_out}")
 
 
 def main():

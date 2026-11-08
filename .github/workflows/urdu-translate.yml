@@ -27,6 +27,8 @@ jobs:
           cache-dependency-path: urdu_translate/requirements-test.txt
       - name: Install torch (CPU wheel)
         run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: System libraries (pango for WeasyPrint, poppler for pdfinfo)
+        run: sudo apt-get update && sudo apt-get install -y libpango-1.0-0 libpangoft2-1.0-0 poppler-utils
       - run: pip install -r requirements-test.txt
       - name: Syntax check
         run: python -m py_compile translate_urdu_pdf.py
