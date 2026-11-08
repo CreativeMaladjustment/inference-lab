@@ -1,0 +1,8 @@
+# Lightweight deps for tests/CI. Surya and NLLB (transformers) are imported lazily
+# and mocked in tests, so the multi-GB model stack is NOT needed here.
+# Install CPU torch first:  pip install torch --index-url https://download.pytorch.org/whl/cpu
+pytest>=8,<9
+pdf2image==1.17.0
+Pillow>=10.2,<12
+langchain-text-splitters>=0.3,<0.4
+tqdm>=4.66

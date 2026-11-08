@@ -1,0 +1,57 @@
+name: urdu-translate
+
+on:
+  push:
+    paths: ["urdu_translate/**", ".github/workflows/urdu-translate.yml"]
+  pull_request:
+    paths: ["urdu_translate/**", ".github/workflows/urdu-translate.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: urdu_translate
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]   # macos-14 = Apple Silicon
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: urdu_translate/requirements-test.txt
+      - name: Install torch (CPU wheel on Linux)
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            pip install torch --index-url https://download.pytorch.org/whl/cpu
+          else
+            pip install torch
+          fi
+      - run: pip install -r requirements-test.txt
+      - name: Syntax check
+        run: python -m py_compile translate_urdu_pdf.py
+      - name: Run tests (OCR and NLLB are stubbed)
+        run: python -m pytest -v
+
+  resolve-requirements:
+    # Checks that the pins in requirements.txt (Surya + transformers) can co-exist.
+    # Dry run only: nothing is downloaded beyond metadata/wheels needed to resolve.
+    name: requirements.txt resolves
+    runs-on: macos-14
+    continue-on-error: true   # informational: pins were chosen without a test install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install --dry-run -r requirements.txt
