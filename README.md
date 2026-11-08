@@ -43,6 +43,8 @@ Try a single file with `--first-page 1 --last-page 3` first.
 
 **Progress:** everything is written to stdout, including the `tqdm` bars (OCR per page, translation per chunk) and one log line per OCR page, e.g. `OCR page 12: 41 lines, 7 paragraphs, 1234 chars` (with a `(no text detected)` flag for blank pages). Page numbers respect `--first-page`. Only model-download bars and library warnings still go to stderr.
 
+**Log file:** every run writes `urdu_translate-<timestamp>.log` (in `--output-dir`, or next to the PDF/folder; override with `--log-file`). It mirrors stdout **and** stderr, so it includes library warnings and tracebacks, with progress bars collapsed to their final state. The header records the command, Python/OS, device (MPS availability) and the versions of torch, transformers, surya-ocr etc., and native crashes (e.g. an MPS segfault) get a `faulthandler` traceback. A failure in one PDF is logged with its traceback and the batch carries on; the run ends with a summary and exits non-zero if anything failed. To troubleshoot, send the `.log` file.
+
 **Output naming:** `book.pdf` → `book.en.md` (and `book.ocr.json` with `--save-ocr`), in `--output-dir`, or next to the PDF if that's not given. Each page in the Markdown starts with a visible `## Page N of book.pdf` heading, and pages are separated by `---`. Provenance is page-level only (no bounding boxes or per-paragraph references).
 
 | Option | Default | Purpose |
