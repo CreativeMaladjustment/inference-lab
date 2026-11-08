@@ -161,7 +161,7 @@ def load_translator(fp16: bool):
 
     tok = AutoTokenizer.from_pretrained(MODEL_NAME, src_lang=SRC_LANG)
     model = AutoModelForSeq2SeqLM.from_pretrained(
-        MODEL_NAME, torch_dtype=torch.float16 if fp16 else torch.float32
+        MODEL_NAME, dtype=torch.float16 if fp16 else torch.float32
     ).to(DEVICE).eval()
     return tok, model
 

@@ -66,6 +66,14 @@ Try a single file with `--first-page 1 --last-page 3` first.
 
 The script sets `TORCH_DEVICE=mps` and `PYTORCH_ENABLE_MPS_FALLBACK=1` before importing Surya, and places NLLB on `mps`; it falls back to CPU with a warning if MPS is unavailable.
 
+### Word frequencies & concordance
+`word_stats.py` counts words in the Urdu OCR text (`*.ocr.json`, written by `--save-ocr`), standard library only, runs in seconds:
+```bash
+python word_stats.py ~/temp/pdfs-to-process
+python word_stats.py ~/temp/pdfs-to-process --search سائنس --context 6    # look a word up
+```
+Writes to `<folder>/word_stats/`: `word_frequencies.csv` (rank, word, total, a count column per book, pages used on), `concordance.csv` (every occurrence with book, PDF page, paragraph and surrounding words, target in `**bold**`), and `summary.txt`. CSVs have a BOM so Excel/Numbers open Urdu correctly. Spelling variants are unified before counting (Arabic vs Urdu yeh/kaf/heh, vowel marks, tatweel, zero-width joiners); numerals and punctuation are ignored (`--keep-numbers` to count numerals). Counts are of OCR text, so OCR misreadings show up as rare spurious words. Page numbers are PDF pages, matching the `## Page N` headings in the `.md`.
+
 ### Tests & CI
 Tests stub out OCR and the NLLB model, so they need no model downloads:
 ```bash
