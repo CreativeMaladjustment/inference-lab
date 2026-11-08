@@ -41,6 +41,8 @@ python translate_urdu_pdf.py ~/temp/pdfs-to-process --output-dir ~/temp/pdfs-tra
 ```
 Try a single file with `--first-page 1 --last-page 3` first.
 
+**Progress:** everything is written to stdout, including the `tqdm` bars (OCR per page, translation per chunk) and one log line per OCR page, e.g. `OCR page 12: 41 lines, 7 paragraphs, 1234 chars` (with a `(no text detected)` flag for blank pages). Page numbers respect `--first-page`. Only model-download bars and library warnings still go to stderr.
+
 **Output naming:** `book.pdf` → `book.en.md` (and `book.ocr.json` with `--save-ocr`), in `--output-dir`, or next to the PDF if that's not given. Each page in the Markdown starts with a visible `## Page N of book.pdf` heading, and pages are separated by `---`. Provenance is page-level only (no bounding boxes or per-paragraph references).
 
 | Option | Default | Purpose |

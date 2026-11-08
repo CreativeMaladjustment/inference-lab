@@ -32,7 +32,13 @@ def get_device() -> torch.device:
 DEVICE = get_device()
 
 from pdf2image import convert_from_path  # noqa: E402
-from tqdm import tqdm  # noqa: E402
+from tqdm import tqdm as _tqdm  # noqa: E402
+
+
+def tqdm(*args, **kwargs):
+    """tqdm writing to stdout (its default is stderr)."""
+    kwargs.setdefault("file", sys.stdout)
+    return _tqdm(*args, **kwargs)
 
 SRC_LANG, TGT_LANG = "urd_Arab", "eng_Latn"
 MODEL_NAME = "facebook/nllb-200-distilled-1.3B"
@@ -85,17 +91,27 @@ def lines_to_paragraphs(lines, gap_factor: float = 1.0) -> list[str]:
     return paras
 
 
-def ocr_pdf(images, ocr_batch: int) -> list[list[str]]:
-    """Returns pages -> paragraphs. Processes a few pages at a time to bound memory."""
+def ocr_pdf(images, ocr_batch: int, first_page: int = 1) -> list[list[str]]:
+    """Returns pages -> paragraphs. Processes a few pages at a time to bound memory.
+
+    Logs one line per page (via tqdm.write so the progress bar stays intact).
+    """
     rec, det = load_ocr()
     pages: list[list[str]] = []
-    for i in tqdm(range(0, len(images), ocr_batch), desc="OCR (Surya)", unit="batch"):
-        batch = images[i:i + ocr_batch]
-        preds = rec(batch, det_predictor=det)
-        for p in preds:
-            pages.append(lines_to_paragraphs(p.text_lines))
-        if DEVICE.type == "mps":
-            torch.mps.empty_cache()
+    with tqdm(total=len(images), desc="OCR (Surya)", unit="page") as bar:
+        for i in range(0, len(images), ocr_batch):
+            preds = rec(images[i:i + ocr_batch], det_predictor=det)
+            for p in preds:
+                paras = lines_to_paragraphs(p.text_lines)
+                pages.append(paras)
+                num = first_page + len(pages) - 1
+                chars = sum(len(x) for x in paras)
+                note = "" if paras else "  (no text detected)"
+                _tqdm.write(f"  OCR page {num}: {len(p.text_lines)} lines, "
+                            f"{len(paras)} paragraphs, {chars} chars{note}", file=sys.stdout)
+                bar.update(1)
+            if DEVICE.type == "mps":
+                torch.mps.empty_cache()
     return pages
 
 
@@ -226,7 +242,7 @@ def process_pdf(pdf: Path, out: Path, a, translator) -> None:
     else:
         images = pdf_to_images(pdf, a.dpi, a.first_page, a.last_page)
         print(f"Rendered {len(images)} pages at {a.dpi} DPI")
-        pages = ocr_pdf(images, a.ocr_batch)
+        pages = ocr_pdf(images, a.ocr_batch, a.first_page or 1)
         del images
         if cache:
             cache.write_text(json.dumps(pages, ensure_ascii=False, indent=1), encoding="utf-8")
