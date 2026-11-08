@@ -171,7 +171,7 @@ def assemble_markdown(num_pages: int, first_page: int, chunks: list[Chunk],
 
     parts = [f"# Translation of {source_name}\n"]
     for p in range(num_pages):
-        parts.append(f"<!-- Page {first_page + p} -->")
+        parts.append(f"## Page {first_page + p} of {source_name}")
         keys = sorted(k for k in paras if k[0] == p)
         if keys:
             parts.extend(" ".join(paras[k]) for k in keys)
@@ -185,8 +185,11 @@ def assemble_markdown(num_pages: int, first_page: int, chunks: list[Chunk],
 # ----------------------------------------------------------------- CLI
 def parse_args():
     ap = argparse.ArgumentParser(description="Translate an Urdu PDF to English Markdown.")
-    ap.add_argument("pdf", type=Path)
-    ap.add_argument("-o", "--output", type=Path, help="Output .md (default: <pdf>.en.md)")
+    ap.add_argument("pdf", type=Path, help="A PDF file, or a directory of PDFs")
+    ap.add_argument("-o", "--output", type=Path,
+                    help="Output .md for a single PDF (default: <pdf name>.en.md next to the PDF)")
+    ap.add_argument("--output-dir", type=Path,
+                    help="Write <pdf name>.en.md files here instead of next to each PDF")
     ap.add_argument("--dpi", type=int, default=200, help="Render DPI (default 200)")
     ap.add_argument("--first-page", type=int, help="1-based first page")
     ap.add_argument("--last-page", type=int, help="1-based last page")
@@ -196,37 +199,68 @@ def parse_args():
     ap.add_argument("--beams", type=int, default=4)
     ap.add_argument("--max-input-tokens", type=int, default=256)
     ap.add_argument("--fp16", action="store_true", help="float16 model (less RAM; may be less stable on MPS)")
-    ap.add_argument("--save-ocr", type=Path, help="Cache OCR text as JSON here (reused if it exists)")
+    ap.add_argument("--save-ocr", action="store_true",
+                    help="Cache OCR text as <pdf name>.ocr.json beside the output (reused if present)")
     return ap.parse_args()
+
+
+def find_pdfs(path: Path) -> list[Path]:
+    if path.is_dir():
+        return sorted(p for p in path.iterdir() if p.suffix.lower() == ".pdf")
+    return [path]
+
+
+def output_path_for(pdf: Path, a) -> Path:
+    if a.output and not a.pdf.is_dir():
+        return a.output
+    folder = a.output_dir or pdf.parent
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / f"{pdf.stem}.en.md"  # book.pdf -> book.en.md
+
+
+def process_pdf(pdf: Path, out: Path, a, translator) -> None:
+    cache = out.with_name(f"{pdf.stem}.ocr.json") if a.save_ocr else None
+    if cache and cache.exists():
+        pages = json.loads(cache.read_text(encoding="utf-8"))
+        print(f"Loaded cached OCR: {len(pages)} pages")
+    else:
+        images = pdf_to_images(pdf, a.dpi, a.first_page, a.last_page)
+        print(f"Rendered {len(images)} pages at {a.dpi} DPI")
+        pages = ocr_pdf(images, a.ocr_batch)
+        del images
+        if cache:
+            cache.write_text(json.dumps(pages, ensure_ascii=False, indent=1), encoding="utf-8")
+
+    chunks = build_chunks(pages, a.chunk_size)
+    print(f"{len(chunks)} chunks from {len(pages)} pages")
+    tok, model = translator()
+    translations = translate_chunks(chunks, tok, model, a.batch_size, a.max_input_tokens, a.beams)
+    out.write_text(
+        assemble_markdown(len(pages), a.first_page or 1, chunks, translations, pdf.name),
+        encoding="utf-8")
+    print(f"Wrote {out}")
 
 
 def main():
     a = parse_args()
-    if not a.pdf.is_file():
-        sys.exit(f"File not found: {a.pdf}")
-    out = a.output or a.pdf.with_suffix(".en.md")
-    print(f"Device: {DEVICE}")
+    a.pdf = a.pdf.expanduser()
+    if not a.pdf.exists():
+        sys.exit(f"Not found: {a.pdf}")
+    pdfs = find_pdfs(a.pdf)
+    if not pdfs:
+        sys.exit(f"No PDFs in {a.pdf}")
+    print(f"Device: {DEVICE}; {len(pdfs)} PDF(s)")
 
-    if a.save_ocr and a.save_ocr.exists():
-        pages = json.loads(a.save_ocr.read_text(encoding="utf-8"))
-        print(f"Loaded cached OCR: {len(pages)} pages")
-    else:
-        images = pdf_to_images(a.pdf, a.dpi, a.first_page, a.last_page)
-        print(f"Rendered {len(images)} pages at {a.dpi} DPI")
-        pages = ocr_pdf(images, a.ocr_batch)
-        del images
-        if a.save_ocr:
-            a.save_ocr.write_text(json.dumps(pages, ensure_ascii=False, indent=1), encoding="utf-8")
+    loaded = []  # load the 1.3B model once, only when first needed
 
-    chunks = build_chunks(pages, a.chunk_size)
-    print(f"{len(chunks)} chunks from {len(pages)} pages")
+    def translator():
+        if not loaded:
+            loaded.append(load_translator(a.fp16))
+        return loaded[0]
 
-    tok, model = load_translator(a.fp16)
-    translations = translate_chunks(chunks, tok, model, a.batch_size, a.max_input_tokens, a.beams)
-
-    md = assemble_markdown(len(pages), a.first_page or 1, chunks, translations, a.pdf.name)
-    out.write_text(md, encoding="utf-8")
-    print(f"Wrote {out}")
+    for pdf in pdfs:
+        print(f"\n=== {pdf.name} ===")
+        process_pdf(pdf, output_path_for(pdf, a), a, translator)
 
 
 if __name__ == "__main__":

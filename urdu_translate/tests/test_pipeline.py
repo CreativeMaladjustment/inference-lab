@@ -80,7 +80,7 @@ def test_assemble_markdown_pages_and_paragraphs():
 
 def test_assemble_page_numbers_offset():
     md = t.assemble_markdown(1, 5, [t.Chunk(0, 0, "a")], ["A"], "x.pdf")
-    assert "<!-- Page 5 -->" in md
+    assert "## Page 5 of x.pdf" in md
 
 
 # ---- translation loop (stub tokenizer/model) --------------------------------
@@ -137,7 +137,7 @@ def test_main_end_to_end(tmp_path, monkeypatch):
     pdf = tmp_path / "in.pdf"
     pdf.write_bytes(b"%PDF-1.4 stub")
     out = tmp_path / "out.md"
-    ocr_cache = tmp_path / "ocr.json"
+    ocr_cache = tmp_path / "in.ocr.json"
 
     monkeypatch.setattr(t, "pdf_to_images", lambda *a, **k: ["img1", "img2"])
     monkeypatch.setattr(t, "ocr_pdf", lambda imgs, b: [["پیراگراف ایک"], ["پیراگراف دو"]])
@@ -147,11 +147,12 @@ def test_main_end_to_end(tmp_path, monkeypatch):
         lambda chunks, tok, model, bs, mt, nb: [f"EN{i}" for i in range(len(chunks))],
     )
     monkeypatch.setattr(
-        sys, "argv", ["prog", str(pdf), "-o", str(out), "--save-ocr", str(ocr_cache)])
+        sys, "argv", ["prog", str(pdf), "-o", str(out), "--save-ocr"])
     t.main()
 
     md = out.read_text(encoding="utf-8")
     assert "EN0" in md and "EN1" in md and "\n---\n" in md
+    assert "## Page 1 of in.pdf" in md and "## Page 2 of in.pdf" in md
     assert json.loads(ocr_cache.read_text(encoding="utf-8")) == [["پیراگراف ایک"], ["پیراگراف دو"]]
 
     # second run reuses the OCR cache (ocr_pdf must not be called)
@@ -163,3 +164,33 @@ def test_main_missing_file(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "argv", ["prog", str(tmp_path / "nope.pdf")])
     with pytest.raises(SystemExit):
         t.main()
+
+
+def test_default_output_name_matches_pdf(tmp_path, monkeypatch):
+    pdf = tmp_path / "My Book.pdf"
+    pdf.write_bytes(b"x")
+    _stub_heavy(monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["prog", str(pdf)])
+    t.main()
+    assert (tmp_path / "My Book.en.md").exists()
+
+
+def test_directory_input_with_output_dir(tmp_path, monkeypatch):
+    src, dst = tmp_path / "in", tmp_path / "out"
+    src.mkdir()
+    for n in ("a.pdf", "b.PDF"):
+        (src / n).write_bytes(b"x")
+    (src / "notes.txt").write_text("ignore")
+    loads = []
+    _stub_heavy(monkeypatch, loads)
+    monkeypatch.setattr(sys, "argv", ["prog", str(src), "--output-dir", str(dst)])
+    t.main()
+    assert sorted(p.name for p in dst.iterdir()) == ["a.en.md", "b.en.md"]
+    assert len(loads) == 1  # model loaded once for the whole batch
+
+
+def _stub_heavy(monkeypatch, loads=None):
+    monkeypatch.setattr(t, "pdf_to_images", lambda *a, **k: ["img"])
+    monkeypatch.setattr(t, "ocr_pdf", lambda imgs, b: [["متن"]])
+    monkeypatch.setattr(t, "load_translator", lambda fp16: (loads.append(1) if loads is not None else None, None))
+    monkeypatch.setattr(t, "translate_chunks", lambda c, *a: ["EN"] * len(c))

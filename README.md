@@ -16,7 +16,7 @@ Pipeline: **PDF → page images → OCR → chunking → translation → Markdow
 1. **OCR** – `pdf2image` renders pages; [Surya](https://github.com/datalab-to/surya) extracts text lines, which are regrouped into paragraphs by vertical gap.
 2. **Chunking** – LangChain's `RecursiveCharacterTextSplitter` splits each paragraph on natural boundaries (newlines, Urdu `۔` / `؟`, then other punctuation, then words). Default 400 chars/chunk, no overlap.
 3. **Translation** – `facebook/nllb-200-distilled-1.3B`, `urd_Arab` → `eng_Latn`, batched, with a `tqdm` progress bar.
-4. **Output** – paragraphs are rebuilt in order; pages are separated by `---`.
+4. **Output** – paragraphs are rebuilt in order, under a `## Page N of <file>` heading per page, separated by `---`.
 
 ### Requirements
 - macOS on Apple Silicon (runs on CPU elsewhere, slowly), Python 3.10–3.12
@@ -35,14 +35,18 @@ pip install -r requirements.txt && pip check
 > Current Surya has no `ur` language argument; it is multilingual and handles Urdu itself.
 
 ### Run
+Process one PDF, or every `*.pdf` in a folder (the 1.3B model is loaded once for the whole batch):
 ```bash
-python translate_urdu_pdf.py /path/to/book.pdf -o book.en.md --save-ocr book.ocr.json
+python translate_urdu_pdf.py ~/temp/pdfs-to-process --output-dir ~/temp/pdfs-translated --save-ocr
 ```
-Try `--first-page 1 --last-page 3` first.
+Try a single file with `--first-page 1 --last-page 3` first.
+
+**Output naming:** `book.pdf` → `book.en.md` (and `book.ocr.json` with `--save-ocr`), in `--output-dir`, or next to the PDF if that's not given. Each page in the Markdown starts with a visible `## Page N of book.pdf` heading, and pages are separated by `---`. Provenance is page-level only (no bounding boxes or per-paragraph references).
 
 | Option | Default | Purpose |
 |---|---|---|
-| `-o, --output` | `<pdf>.en.md` | Output Markdown path |
+| `-o, --output` | `<pdf name>.en.md` | Output path (single PDF only) |
+| `--output-dir` | next to each PDF | Folder for outputs |
 | `--dpi` | 200 | Page render resolution |
 | `--first-page / --last-page` | all | 1-based page range |
 | `--ocr-batch` | 2 | Pages per OCR batch (memory) |
@@ -51,7 +55,7 @@ Try `--first-page 1 --last-page 3` first.
 | `--beams` | 4 | Beam-search width |
 | `--max-input-tokens` | 256 | Truncation limit per chunk |
 | `--fp16` | off | Half-precision model (less RAM, may be less stable on MPS) |
-| `--save-ocr FILE` | – | Cache OCR JSON; reused on re-run (OCR is the slow step) |
+| `--save-ocr` | off | Cache OCR as `<pdf name>.ocr.json`; reused on re-run (OCR is the slow step) |
 
 The script sets `TORCH_DEVICE=mps` and `PYTORCH_ENABLE_MPS_FALLBACK=1` before importing Surya, and places NLLB on `mps`; it falls back to CPU with a warning if MPS is unavailable.
 
@@ -61,6 +65,6 @@ Tests stub out OCR and the NLLB model, so they need no model downloads:
 pip install torch && pip install -r requirements-test.txt
 python -m pytest
 ```
-They cover device selection, paragraph grouping, chunking, translation ordering / forced English BOS, Markdown assembly, and the CLI end to end (including OCR caching).
+They cover device selection, paragraph grouping, chunking, translation ordering / forced English BOS, Markdown assembly, and the CLI end to end (including OCR caching, folder input and output naming).
 
 GitHub Actions ([`urdu-translate.yml`](.github/workflows/urdu-translate.yml)) runs them on Ubuntu and macOS (Apple Silicon), Python 3.10 and 3.12, plus a non-blocking check that `requirements.txt` resolves. CI does **not** run real Surya/NLLB inference, and hosted macOS runners have no usable MPS, so real-model and MPS behaviour must be verified locally.
