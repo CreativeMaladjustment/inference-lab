@@ -140,7 +140,7 @@ def test_main_end_to_end(tmp_path, monkeypatch):
     ocr_cache = tmp_path / "in.ocr.json"
 
     monkeypatch.setattr(t, "pdf_to_images", lambda *a, **k: ["img1", "img2"])
-    monkeypatch.setattr(t, "ocr_pdf", lambda imgs, b: [["پیراگراف ایک"], ["پیراگراف دو"]])
+    monkeypatch.setattr(t, "ocr_pdf", lambda imgs, *a: [["پیراگراف ایک"], ["پیراگراف دو"]])
     monkeypatch.setattr(t, "load_translator", lambda fp16: (None, None))
     monkeypatch.setattr(
         t, "translate_chunks",
@@ -156,7 +156,7 @@ def test_main_end_to_end(tmp_path, monkeypatch):
     assert json.loads(ocr_cache.read_text(encoding="utf-8")) == [["پیراگراف ایک"], ["پیراگراف دو"]]
 
     # second run reuses the OCR cache (ocr_pdf must not be called)
-    monkeypatch.setattr(t, "ocr_pdf", lambda *a: pytest.fail("OCR should be cached"))
+    monkeypatch.setattr(t, "ocr_pdf", lambda *a, **k: pytest.fail("OCR should be cached"))
     t.main()
 
 
@@ -185,12 +185,99 @@ def test_directory_input_with_output_dir(tmp_path, monkeypatch):
     _stub_heavy(monkeypatch, loads)
     monkeypatch.setattr(sys, "argv", ["prog", str(src), "--output-dir", str(dst)])
     t.main()
-    assert sorted(p.name for p in dst.iterdir()) == ["a.en.md", "b.en.md"]
+    assert sorted(p.name for p in dst.glob("*.md")) == ["a.en.md", "b.en.md"]
+    assert len(list(dst.glob("urdu_translate-*.log"))) == 1
     assert len(loads) == 1  # model loaded once for the whole batch
 
 
 def _stub_heavy(monkeypatch, loads=None):
     monkeypatch.setattr(t, "pdf_to_images", lambda *a, **k: ["img"])
-    monkeypatch.setattr(t, "ocr_pdf", lambda imgs, b: [["متن"]])
+    monkeypatch.setattr(t, "ocr_pdf", lambda imgs, *a: [["متن"]])
     monkeypatch.setattr(t, "load_translator", lambda fp16: (loads.append(1) if loads is not None else None, None))
     monkeypatch.setattr(t, "translate_chunks", lambda c, *a: ["EN"] * len(c))
+
+
+class _FakePred:
+    def __init__(self, lines):
+        self.text_lines = lines
+
+
+def test_ocr_logs_each_page_to_stdout_with_real_page_numbers(monkeypatch, capsys):
+    pages = [[line("متن", 0, 20)], [], [line("اور", 0, 20)]]
+    monkeypatch.setattr(t, "load_ocr", lambda: (
+        lambda imgs, det_predictor: [_FakePred(pages.pop(0)) for _ in imgs], None))
+    result = t.ocr_pdf(["a", "b", "c"], ocr_batch=2, first_page=10)
+    cap = capsys.readouterr()
+    assert result == [["متن"], [], ["اور"]]
+    for n in (10, 11, 12):
+        assert f"OCR page {n}:" in cap.out
+    assert "no text detected" in cap.out
+    assert "OCR (Surya)" in cap.out          # progress bar on stdout...
+    assert "OCR (Surya)" not in cap.err      # ...not stderr
+
+
+def test_translation_progress_bar_on_stdout(capsys):
+    tok = FakeTok2()
+    t.translate_chunks([t.Chunk(0, 0, "x_0")], tok, FakeModel(tok), 1, 64, 1)
+    cap = capsys.readouterr()
+    assert "Translating (NLLB)" in cap.out and "Translating" not in cap.err
+
+
+def test_log_file_written_with_header_and_collapsed_progress(tmp_path, monkeypatch):
+    pdf = tmp_path / "in.pdf"
+    pdf.write_bytes(b"x")
+    log = tmp_path / "run.log"
+    _stub_heavy(monkeypatch)
+    monkeypatch.setattr(t, "ocr_pdf", lambda *a: _noisy_ocr())
+    monkeypatch.setattr(sys, "argv", ["prog", str(pdf), "--log-file", str(log)])
+    t.main()
+    text = log.read_text(encoding="utf-8")
+    assert "command:" in text and "packages:" in text and "device:" in text
+    assert "=== in.pdf ===" in text and "Wrote" in text
+    assert "Summary: 1 succeeded, 0 failed" in text
+    assert "[err] some warning" in text
+    assert "\r" not in text
+    assert text.count("bar 100%") == 1 and "bar 10%" not in text   # redraws collapsed
+    assert not isinstance(sys.stdout, t._Tee)
+
+
+def _noisy_ocr():
+    sys.stderr.write("some warning\n")
+    sys.stdout.write("bar 10%\rbar 50%\rbar 100%\n")
+    return [["متن"]]
+
+
+def test_failure_is_logged_and_batch_continues(tmp_path, monkeypatch):
+    src = tmp_path / "in"
+    src.mkdir()
+    for n in ("a.pdf", "b.pdf"):
+        (src / n).write_bytes(b"x")
+    log = tmp_path / "run.log"
+    _stub_heavy(monkeypatch)
+
+    def ocr(imgs, *a):
+        if monkeypatch_state["n"] == 0:
+            monkeypatch_state["n"] += 1
+            raise RuntimeError("MPS exploded")
+        return [["متن"]]
+
+    monkeypatch_state = {"n": 0}
+    monkeypatch.setattr(t, "ocr_pdf", ocr)
+    monkeypatch.setattr(sys, "argv", ["prog", str(src), "--output-dir", str(tmp_path / "o"),
+                                      "--log-file", str(log)])
+    with pytest.raises(SystemExit) as e:
+        t.main()
+    assert e.value.code == 1
+    text = log.read_text(encoding="utf-8")
+    assert "FAILED a.pdf" in text and "RuntimeError: MPS exploded" in text and "Traceback" in text
+    assert "Summary: 1 succeeded, 1 failed: a.pdf" in text
+    assert (tmp_path / "o" / "b.en.md").exists()           # second PDF still processed
+    assert not isinstance(sys.stdout, t._Tee)               # streams restored
+
+
+def test_default_log_location(tmp_path):
+    a = SimpleNamespace(output_dir=None, pdf=tmp_path)
+    assert t.default_log_path(a).parent == tmp_path
+    a = SimpleNamespace(output_dir=tmp_path / "o", pdf=tmp_path)
+    assert t.default_log_path(a).parent == tmp_path / "o"
+    assert t.default_log_path(a).name.startswith("urdu_translate-")

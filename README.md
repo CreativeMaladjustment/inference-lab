@@ -19,7 +19,7 @@ Pipeline: **PDF → page images → OCR → chunking → translation → Markdow
 4. **Output** – paragraphs are rebuilt in order, under a `## Page N of <file>` heading per page, separated by `---`.
 
 ### Requirements
-- macOS on Apple Silicon (runs on CPU elsewhere, slowly), Python 3.10–3.12
+- macOS on Apple Silicon (runs on CPU elsewhere, slowly), Python 3.13 (3.14 isn't usable yet: Surya 0.17 needs Pillow<11, which has no 3.14 wheels)
 - Poppler: `brew install poppler`
 - Disk/RAM for the NLLB 1.3B model (~5 GB download, ~5 GB RAM in fp32)
 
@@ -30,7 +30,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt && pip check
 ```
 
-> **Dependency note:** `surya-ocr` pins a narrow `transformers` range; NLLB works with most 4.x, so `transformers` is pinned to Surya's requirement. Don't `pip install -U transformers`. The pins in `requirements.txt` were not test-installed by the author; if `pip check` complains, align with `pip show surya-ocr`. The CI job *requirements.txt resolves* reports whether they currently resolve.
+> **Dependency note:** `surya-ocr` 0.17 requires `transformers>=4.56.1` and `Pillow<11`; we pin `transformers==4.56.1`. Don't upgrade `surya-ocr` past 0.17.x: Surya v2 (0.20+) needs transformers 5 and a vllm/llama.cpp server and has a different API than this script. The pins resolve together on Python 3.13 (Linux dry run); they haven't been installed or run on a Mac.
 >
 > Current Surya has no `ur` language argument; it is multilingual and handles Urdu itself.
 
@@ -40,6 +40,10 @@ Process one PDF, or every `*.pdf` in a folder (the 1.3B model is loaded once for
 python translate_urdu_pdf.py ~/temp/pdfs-to-process --output-dir ~/temp/pdfs-translated --save-ocr
 ```
 Try a single file with `--first-page 1 --last-page 3` first.
+
+**Progress:** everything is written to stdout, including the `tqdm` bars (OCR per page, translation per chunk) and one log line per OCR page, e.g. `OCR page 12: 41 lines, 7 paragraphs, 1234 chars` (with a `(no text detected)` flag for blank pages). Page numbers respect `--first-page`. Only model-download bars and library warnings still go to stderr.
+
+**Log file:** every run writes `urdu_translate-<timestamp>.log` (in `--output-dir`, or next to the PDF/folder; override with `--log-file`). It mirrors stdout **and** stderr, so it includes library warnings and tracebacks, with progress bars collapsed to their final state. The header records the command, Python/OS, device (MPS availability) and the versions of torch, transformers, surya-ocr etc., and native crashes (e.g. an MPS segfault) get a `faulthandler` traceback. A failure in one PDF is logged with its traceback and the batch carries on; the run ends with a summary and exits non-zero if anything failed. To troubleshoot, send the `.log` file.
 
 **Output naming:** `book.pdf` → `book.en.md` (and `book.ocr.json` with `--save-ocr`), in `--output-dir`, or next to the PDF if that's not given. Each page in the Markdown starts with a visible `## Page N of book.pdf` heading, and pages are separated by `---`. Provenance is page-level only (no bounding boxes or per-paragraph references).
 
@@ -67,4 +71,4 @@ python -m pytest
 ```
 They cover device selection, paragraph grouping, chunking, translation ordering / forced English BOS, Markdown assembly, and the CLI end to end (including OCR caching, folder input and output naming).
 
-GitHub Actions ([`urdu-translate.yml`](.github/workflows/urdu-translate.yml)) runs them on Ubuntu with Python 3.10 and 3.12, plus a non-blocking check that `requirements.txt` resolves. CI does **not** run real Surya/NLLB inference or exercise MPS, so real-model and MPS behaviour must be verified locally.
+GitHub Actions ([`urdu-translate.yml`](.github/workflows/urdu-translate.yml)) runs them on Ubuntu with Python 3.13, plus a non-blocking check that `requirements.txt` resolves. CI does **not** run real Surya/NLLB inference or exercise MPS, so real-model and MPS behaviour must be verified locally.

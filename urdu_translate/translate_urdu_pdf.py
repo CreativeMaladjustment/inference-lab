@@ -6,10 +6,15 @@ Usage: python translate_urdu_pdf.py input.pdf [-o output.md]
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import os
+import platform
 import statistics
 import sys
+import time
+import traceback
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,7 +37,13 @@ def get_device() -> torch.device:
 DEVICE = get_device()
 
 from pdf2image import convert_from_path  # noqa: E402
-from tqdm import tqdm  # noqa: E402
+from tqdm import tqdm as _tqdm  # noqa: E402
+
+
+def tqdm(*args, **kwargs):
+    """tqdm writing to stdout (its default is stderr)."""
+    kwargs.setdefault("file", sys.stdout)
+    return _tqdm(*args, **kwargs)
 
 SRC_LANG, TGT_LANG = "urd_Arab", "eng_Latn"
 MODEL_NAME = "facebook/nllb-200-distilled-1.3B"
@@ -85,17 +96,27 @@ def lines_to_paragraphs(lines, gap_factor: float = 1.0) -> list[str]:
     return paras
 
 
-def ocr_pdf(images, ocr_batch: int) -> list[list[str]]:
-    """Returns pages -> paragraphs. Processes a few pages at a time to bound memory."""
+def ocr_pdf(images, ocr_batch: int, first_page: int = 1) -> list[list[str]]:
+    """Returns pages -> paragraphs. Processes a few pages at a time to bound memory.
+
+    Logs one line per page (via tqdm.write so the progress bar stays intact).
+    """
     rec, det = load_ocr()
     pages: list[list[str]] = []
-    for i in tqdm(range(0, len(images), ocr_batch), desc="OCR (Surya)", unit="batch"):
-        batch = images[i:i + ocr_batch]
-        preds = rec(batch, det_predictor=det)
-        for p in preds:
-            pages.append(lines_to_paragraphs(p.text_lines))
-        if DEVICE.type == "mps":
-            torch.mps.empty_cache()
+    with tqdm(total=len(images), desc="OCR (Surya)", unit="page") as bar:
+        for i in range(0, len(images), ocr_batch):
+            preds = rec(images[i:i + ocr_batch], det_predictor=det)
+            for p in preds:
+                paras = lines_to_paragraphs(p.text_lines)
+                pages.append(paras)
+                num = first_page + len(pages) - 1
+                chars = sum(len(x) for x in paras)
+                note = "" if paras else "  (no text detected)"
+                _tqdm.write(f"  OCR page {num}: {len(p.text_lines)} lines, "
+                            f"{len(paras)} paragraphs, {chars} chars{note}", file=sys.stdout)
+                bar.update(1)
+            if DEVICE.type == "mps":
+                torch.mps.empty_cache()
     return pages
 
 
@@ -199,9 +220,95 @@ def parse_args():
     ap.add_argument("--beams", type=int, default=4)
     ap.add_argument("--max-input-tokens", type=int, default=256)
     ap.add_argument("--fp16", action="store_true", help="float16 model (less RAM; may be less stable on MPS)")
+    ap.add_argument("--log-file", type=Path,
+                    help="Log file (default: urdu_translate-<timestamp>.log in the output folder)")
     ap.add_argument("--save-ocr", action="store_true",
                     help="Cache OCR text as <pdf name>.ocr.json beside the output (reused if present)")
     return ap.parse_args()
+
+
+# ----------------------------------------------------------------- logging
+class _Tee:
+    """Copies everything written to stdout/stderr into the log file.
+
+    Console output is passed through untouched. In the log, tqdm's carriage-return
+    redraws are collapsed so each progress bar appears once (its final state).
+    """
+
+    def __init__(self, stream, logfile, tag: str):
+        self.stream, self.logfile, self.tag, self._buf = stream, logfile, tag, ""
+
+    def write(self, data):
+        n = self.stream.write(data)
+        self._buf += data
+        *lines, self._buf = self._buf.split("\n")
+        for ln in lines:
+            self._emit(ln)
+        return n
+
+    def _emit(self, line):
+        line = line.rsplit("\r", 1)[-1]
+        if line.strip():
+            self.logfile.write(f"{datetime.now():%H:%M:%S} [{self.tag}] {line}\n")
+            self.logfile.flush()
+
+    def flush(self):
+        self.stream.flush()
+
+    def finish(self):
+        if self._buf:
+            self._emit(self._buf)
+            self._buf = ""
+
+    def __getattr__(self, name):  # isatty(), encoding, ... so tqdm etc. behave normally
+        return getattr(self.stream, name)
+
+
+def _versions() -> str:
+    from importlib import metadata
+
+    out = []
+    for pkg in ("torch", "transformers", "surya-ocr", "pdf2image", "Pillow", "sentencepiece",
+                "tokenizers", "langchain-text-splitters", "tqdm"):
+        try:
+            out.append(f"{pkg}={metadata.version(pkg)}")
+        except metadata.PackageNotFoundError:
+            out.append(f"{pkg}=NOT INSTALLED")
+    return ", ".join(out)
+
+
+def default_log_path(a) -> Path:
+    folder = a.output_dir or (a.pdf if a.pdf.is_dir() else a.pdf.parent)
+    return folder / f"urdu_translate-{datetime.now():%Y%m%d-%H%M%S}.log"
+
+
+def start_logging(path: Path, a):
+    """Mirror stdout+stderr into `path` and dump an environment header. Returns a stop() callable."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    logfile = open(path, "w", encoding="utf-8", buffering=1)
+    faulthandler.enable(file=logfile)  # native crashes (e.g. MPS segfault) leave a traceback
+    out, err = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = _Tee(out, logfile, "out"), _Tee(err, logfile, "err")
+    header = [
+        f"started: {datetime.now().isoformat(timespec='seconds')}",
+        f"command: {' '.join(sys.argv)}",
+        f"python: {sys.version.split()[0]} on {platform.platform()} ({platform.machine()})",
+        f"device: {DEVICE}; mps_available={torch.backends.mps.is_available()} "
+        f"mps_built={torch.backends.mps.is_built()}; "
+        f"PYTORCH_ENABLE_MPS_FALLBACK={os.environ.get('PYTORCH_ENABLE_MPS_FALLBACK')}",
+        f"packages: {_versions()}",
+        f"args: {vars(a)}",
+    ]
+    logfile.write("\n".join(header) + "\n" + "=" * 70 + "\n")
+
+    def stop():
+        sys.stdout.finish()
+        sys.stderr.finish()
+        sys.stdout, sys.stderr = out, err
+        faulthandler.disable()
+        logfile.close()
+
+    return stop
 
 
 def find_pdfs(path: Path) -> list[Path]:
@@ -226,7 +333,7 @@ def process_pdf(pdf: Path, out: Path, a, translator) -> None:
     else:
         images = pdf_to_images(pdf, a.dpi, a.first_page, a.last_page)
         print(f"Rendered {len(images)} pages at {a.dpi} DPI")
-        pages = ocr_pdf(images, a.ocr_batch)
+        pages = ocr_pdf(images, a.ocr_batch, a.first_page or 1)
         del images
         if cache:
             cache.write_text(json.dumps(pages, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -249,18 +356,43 @@ def main():
     pdfs = find_pdfs(a.pdf)
     if not pdfs:
         sys.exit(f"No PDFs in {a.pdf}")
-    print(f"Device: {DEVICE}; {len(pdfs)} PDF(s)")
 
-    loaded = []  # load the 1.3B model once, only when first needed
+    log_path = (a.log_file or default_log_path(a)).expanduser()
+    stop_logging = start_logging(log_path, a)
+    failed: list[str] = []
+    try:
+        print(f"Log file: {log_path}")
+        print(f"Device: {DEVICE}; {len(pdfs)} PDF(s)")
 
-    def translator():
-        if not loaded:
-            loaded.append(load_translator(a.fp16))
-        return loaded[0]
+        loaded = []  # load the 1.3B model once, only when first needed
 
-    for pdf in pdfs:
-        print(f"\n=== {pdf.name} ===")
-        process_pdf(pdf, output_path_for(pdf, a), a, translator)
+        def translator():
+            if not loaded:
+                loaded.append(load_translator(a.fp16))
+            return loaded[0]
+
+        for pdf in pdfs:
+            print(f"\n=== {pdf.name} ===")
+            t0 = time.time()
+            try:
+                process_pdf(pdf, output_path_for(pdf, a), a, translator)
+                print(f"Finished {pdf.name} in {time.time() - t0:.0f}s")
+            except KeyboardInterrupt:
+                print("Interrupted by user.", file=sys.stderr)
+                failed.append(f"{pdf.name} (interrupted)")
+                break
+            except Exception:  # keep going: one bad PDF shouldn't abort the batch
+                print(f"FAILED {pdf.name} after {time.time() - t0:.0f}s:\n{traceback.format_exc()}",
+                      file=sys.stderr)
+                failed.append(pdf.name)
+
+        print(f"\nSummary: {len(pdfs) - len(failed)} succeeded, {len(failed)} failed"
+              + (f": {', '.join(failed)}" if failed else ""))
+        print(f"Log file: {log_path}")
+    finally:
+        stop_logging()
+    if failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

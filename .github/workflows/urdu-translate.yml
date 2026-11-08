@@ -16,17 +16,13 @@ defaults:
 
 jobs:
   test:
-    name: tests (py${{ matrix.python }})
+    name: tests (py3.13)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python: ["3.10", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python }}
+          python-version: "3.13"
           cache: pip
           cache-dependency-path: urdu_translate/requirements-test.txt
       - name: Install torch (CPU wheel)
@@ -38,14 +34,15 @@ jobs:
         run: python -m pytest -v
 
   resolve-requirements:
-    # Checks that the pins in requirements.txt (Surya + transformers) can co-exist.
-    # Dry run only: nothing is downloaded beyond metadata/wheels needed to resolve.
-    name: requirements.txt resolves
-    runs-on: macos-14
-    continue-on-error: true   # informational: pins were chosen without a test install
+    # Checks that the pins in requirements.txt (Surya + transformers + torch) can co-exist
+    # on Python 3.13. Dry run (Linux wheels; the Mac resolution differs only in torch's
+    # platform wheels). Informational, so it doesn't block.
+    name: requirements.txt resolves (py3.13)
+    runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.13"
       - run: pip install --dry-run -r requirements.txt
