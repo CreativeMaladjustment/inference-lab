@@ -1,18 +1,21 @@
-# Python 3.10-3.12 recommended (macOS, Apple Silicon). System dep: `brew install poppler`
+# Python 3.13 recommended (macOS, Apple Silicon). System dep: `brew install poppler`
+# Python 3.14 is NOT usable: surya-ocr 0.17 requires Pillow<11, which has no 3.14 wheels.
 #
-# KNOWN CONFLICT: surya-ocr hard-pins a narrow transformers range (its Qwen-style
-# recognition model breaks on other versions), while NLLB works on almost any
-# transformers 4.x. So transformers is pinned to what Surya needs and NLLB follows.
-# Do NOT `pip install -U transformers`. After installing, run `pip check`.
-# Versions below were chosen from memory of Surya's constraints and NOT test-installed
-# here; if pip reports a resolver conflict, trust Surya's own pin:
-#   pip show surya-ocr   (see "Requires")
+# Notes on the Surya / Hugging Face ecosystem:
+#  * surya-ocr 0.17.0 needs transformers>=4.56.1 (a floor, not an exact pin) and
+#    Pillow<11. NLLB works fine on transformers 4.56.x, so we pin 4.56.1 for
+#    reproducibility. Don't `pip install -U transformers`: transformers 5.x is
+#    untested with this script, and surya 0.23+ (Surya "v2") requires it.
+#  * Do NOT upgrade surya-ocr past 0.17.x: v2 replaced FoundationPredictor with
+#    SuryaInferenceManager and needs a vllm/llama.cpp server; this script targets v1.
+#  * sentencepiece needs >=0.2.1 for Python 3.13 wheels (0.2.0 has none).
+# Run `pip check` after installing.
 torch>=2.7.0,<2.9
 surya-ocr==0.17.0
 transformers==4.56.1
 pdf2image==1.17.0
-Pillow>=10.2,<12
-sentencepiece==0.2.0        # required by the NLLB tokenizer
+Pillow>=10.2,<11
+sentencepiece>=0.2.1,<0.3       # required by the NLLB tokenizer
 protobuf>=4.25,<6           # sentencepiece/tokenizer conversion
 accelerate>=0.34,<2
 langchain-text-splitters>=0.3,<0.4

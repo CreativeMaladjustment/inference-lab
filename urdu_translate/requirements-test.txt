@@ -3,6 +3,6 @@
 # Install CPU torch first:  pip install torch --index-url https://download.pytorch.org/whl/cpu
 pytest>=8,<9
 pdf2image==1.17.0
-Pillow>=10.2,<12
+Pillow>=10.2,<11
 langchain-text-splitters>=0.3,<0.4
 tqdm>=4.66
