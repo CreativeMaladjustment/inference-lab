@@ -106,3 +106,42 @@ def test_rejects_bad_json(tmp_path):
 def test_no_inputs_is_an_error(tmp_path):
     with pytest.raises(SystemExit):
         w.find_inputs([tmp_path])
+
+
+def test_translate_words_caches_and_skips_latin(tmp_path):
+    cache = tmp_path / "t.json"
+    calls = []
+
+    def fake(words):
+        calls.append(list(words))
+        return [f"EN({x}). " for x in words]
+
+    out = w.translate_words(["علم", "einstein", "اللہ"], cache, translator=fake)
+    assert out == {"علم": "en(علم)", "einstein": "einstein", "اللہ": "en(اللہ)"}
+    assert calls == [["علم", "اللہ"]]               # Latin word never sent to the model
+    # second run: everything cached, model not called; manual edits to the cache are honoured
+    data = json.loads(cache.read_text(encoding="utf-8"))
+    data["علم"] = "knowledge"
+    cache.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    out2 = w.translate_words(["علم", "اللہ"], cache, translator=lambda ws: pytest.fail("cached"))
+    assert out2["علم"] == "knowledge" and len(calls) == 1
+
+
+def test_frequency_rows_and_summary_include_gloss():
+    an = w.analyze(BOOKS)
+    rows = w.frequency_rows(an, glosses={"علم": "knowledge"})
+    assert rows[0][1:4] == ["علم", "knowledge", "urdu"]
+    assert rows[1][2] == ""                         # untranslated words get an empty gloss
+    assert "علم   = knowledge" in w.summary_text(an, glosses={"علم": "knowledge"})
+
+
+def test_cli_translate_flag(tmp_path, monkeypatch):
+    (tmp_path / "B.ocr.json").write_text(json.dumps(BOOKS["bookA"], ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(w, "_nllb_translator", lambda fp16: (lambda ws: [f"gloss-{x}" for x in ws]))
+    w.main([str(tmp_path), "--translate", "--translate-top", "2"])
+    out = tmp_path / "word_stats"
+    rows = list(csv.reader((out / "word_frequencies.csv").read_text(encoding="utf-8-sig").splitlines()))
+    assert rows[0][:4] == ["rank", "word", "english_gloss_machine", "script"]
+    glossed = [r for r in rows[1:] if r[2]]
+    assert len(glossed) == 2                        # only the top 2 words translated
+    assert (out / "word_translations.json").exists()

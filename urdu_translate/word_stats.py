@@ -142,7 +142,7 @@ def write_csv(path: Path, header: list[str], rows) -> None:
         w.writerows(rows)
 
 
-def frequency_rows(an: Analysis, min_count: int = 1) -> list[list]:
+def frequency_rows(an: Analysis, min_count: int = 1, glosses: dict | None = None) -> list[list]:
     total = Counter()
     for c in an.counts.values():
         total.update(c)
@@ -153,12 +153,53 @@ def frequency_rows(an: Analysis, min_count: int = 1) -> list[list]:
         if n != prev:
             rank, prev = shown, n   # equal counts share a rank ("competition" ranking)
         if n >= min_count:
-            rows.append([rank, word, script_of(word), n]
-                        + [an.counts[b][word] for b in an.books] + [len(an.pages[word])])
+            row = ([rank, word, script_of(word), n]
+                   + [an.counts[b][word] for b in an.books] + [len(an.pages[word])])
+            if glosses is not None:                    # English sits next to the word
+                row.insert(2, glosses.get(word, ""))
+            rows.append(row)
     return rows
 
 
-def summary_text(an: Analysis, top: int = 25) -> str:
+# ------------------------------------------------------------------ English glosses
+def translate_words(words: list[str], cache_path: Path, translator=None, fp16: bool = False) -> dict:
+    """Machine-translate single words (Urdu -> English) with NLLB. Results are cached in
+    `cache_path` (JSON) so re-runs are instant; edit that file to correct a gloss.
+    Latin-script words are copied as they are. `translator(list[str]) -> list[str]` is
+    injectable for tests; the default loads the NLLB model."""
+    cache: dict = {}
+    if cache_path.exists():
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    for wd in words:
+        if script_of(wd) != "urdu":
+            cache.setdefault(wd, wd)
+    todo = [wd for wd in words if wd not in cache]
+    if todo:
+        if translator is None:
+            translator = _nllb_translator(fp16)
+        print(f"Translating {len(todo)} word(s) with NLLB ({len(cache)} already cached)")
+        for wd, en in zip(todo, translator(todo)):
+            cache[wd] = en.strip().rstrip(".").lower()
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=1, sort_keys=True),
+                              encoding="utf-8")
+    return {wd: cache[wd] for wd in words}
+
+
+def _nllb_translator(fp16: bool):
+    import translate_urdu_pdf as tu   # heavy import (torch); only when --translate is used
+
+    tok, model = tu.load_translator(fp16)
+
+    def run(words: list[str]) -> list[str]:
+        chunks = [tu.Chunk(0, i, wd) for i, wd in enumerate(words)]
+        # single words: short inputs; NLLB can still ramble on a non-word, so treat glosses as hints
+        return tu.translate_chunks(chunks, tok, model, batch_size=16, max_input_tokens=16, num_beams=4)
+
+    return run
+
+
+def summary_text(an: Analysis, top: int = 25, glosses: dict | None = None) -> str:
     lines = []
     total = Counter()
     for b in an.books:
@@ -171,7 +212,8 @@ def summary_text(an: Analysis, top: int = 25) -> str:
     lines.append("")
     lines.append(f"Top {top} words overall:")
     for word, n in sorted(total.items(), key=lambda kv: (-kv[1], kv[0]))[:top]:
-        lines.append(f"  {n:6d}  {word}")
+        gloss = f"   = {glosses[word]}" if glosses and glosses.get(word) else ""
+        lines.append(f"  {n:6d}  {word}{gloss}")
     return "\n".join(lines) + "\n"
 
 
@@ -193,6 +235,11 @@ def parse_args(argv=None):
     ap.add_argument("--context", type=int, default=8, help="Words of context either side (default 8)")
     ap.add_argument("--min-count", type=int, default=1, help="Hide words used fewer times in the frequency CSV")
     ap.add_argument("--keep-numbers", action="store_true", help="Count numerals as words")
+    ap.add_argument("--translate", action="store_true",
+                    help="Add an English gloss (NLLB, single-word, machine-made) for the most frequent words")
+    ap.add_argument("--translate-top", type=int, default=300,
+                    help="How many of the most frequent words to translate (default 300)")
+    ap.add_argument("--fp16", action="store_true", help="Half-precision NLLB (less RAM)")
     ap.add_argument("--search", nargs="+", metavar="WORD", help="Print where these words occur and exit")
     ap.add_argument("--limit", type=int, default=50, help="Max --search results printed")
     return ap.parse_args(argv)
@@ -216,12 +263,20 @@ def main(argv=None):
     first = a.inputs[0].expanduser()
     out_dir = a.output_dir or ((first if first.is_dir() else first.parent) / "word_stats")
     out_dir.mkdir(parents=True, exist_ok=True)
-    write_csv(out_dir / "word_frequencies.csv",
-              ["rank", "word", "script", "total"] + an.books + ["pages_used_on"],
-              frequency_rows(an, a.min_count))
+    glosses = None
+    if a.translate:
+        total = Counter()
+        for c in an.counts.values():
+            total.update(c)
+        top_words = [wd for wd, _ in sorted(total.items(), key=lambda kv: (-kv[1], kv[0]))[:a.translate_top]]
+        glosses = translate_words(top_words, out_dir / "word_translations.json", fp16=a.fp16)
+    header = ["rank", "word", "script", "total"] + an.books + ["pages_used_on"]
+    if glosses is not None:
+        header.insert(2, "english_gloss_machine")
+    write_csv(out_dir / "word_frequencies.csv", header, frequency_rows(an, a.min_count, glosses))
     write_csv(out_dir / "concordance.csv",
               ["book", "page", "paragraph", "word", "form_in_text", "context"], an.rows)
-    text = summary_text(an)
+    text = summary_text(an, glosses=glosses)
     (out_dir / "summary.txt").write_text(text, encoding="utf-8")
     print(text)
     print(f"Wrote word_frequencies.csv, concordance.csv ({len(an.rows)} rows), summary.txt in {out_dir}")
