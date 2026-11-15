@@ -29,7 +29,7 @@ from pathlib import Path
 # Arabic/Urdu vowel marks and Quranic annotation signs, tatweel, and invisible formatting
 # characters (incl. zero-width non-joiner, which is removed, not replaced by a space).
 _STRIP = re.compile(
-    "[ؐ-ًؚ-ٰٟۖ-ۭـ​-‏‪-‮⁦-⁩﻿]")
+    "[\u0610-\u061a\u064b-\u065f\u0670\u06d6-\u06ed\u0640\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
 # Arabic-script letter variants -> the Urdu form. (ھ do-chashmi he U+06BE is a distinct Urdu
 # letter and is deliberately NOT merged.)
 _FOLD = str.maketrans({"ي": "ی", "ى": "ی", "ك": "ک", "ه": "ہ"})
