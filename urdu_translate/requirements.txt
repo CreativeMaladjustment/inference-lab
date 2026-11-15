@@ -9,9 +9,12 @@
 #  * Do NOT upgrade surya-ocr past 0.17.x: v2 replaced FoundationPredictor with
 #    SuryaInferenceManager and needs a vllm/llama.cpp server; this script targets v1.
 #  * sentencepiece needs >=0.2.1 for Python 3.13 wheels (0.2.0 has none).
+#  * KNOWN OPEN pip-audit findings, blocked by surya-ocr 0.17: Pillow (<11 cap; fixes
+#    are in 12.x/13.x) and transformers 4.56.1 (fixes are only in 5.x). Clearing them
+#    means migrating to surya v2 (see above), which is a separate piece of work.
 # Optional --to-pdf output also needs the system library:  brew install pango
 # Run `pip check` after installing.
-torch>=2.7.0,<2.9
+torch>=2.10,<3
 surya-ocr==0.17.0
 transformers==4.56.1
 pdf2image==1.17.0
@@ -19,7 +22,7 @@ Pillow>=10.2,<11
 sentencepiece>=0.2.1,<0.3       # required by the NLLB tokenizer
 protobuf>=4.25,<6           # sentencepiece/tokenizer conversion
 accelerate>=0.34,<2
-langchain-text-splitters>=0.3,<0.4
+langchain-text-splitters>=1.1.2,<2
 tqdm>=4.66
 markdown>=3.7,<4            # --to-pdf
 weasyprint>=66,<71          # --to-pdf (needs `brew install pango` on macOS)
