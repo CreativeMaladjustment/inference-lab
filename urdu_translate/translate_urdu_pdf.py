@@ -47,7 +47,8 @@ def tqdm(*args, **kwargs):
 
 SRC_LANG, TGT_LANG = "urd_Arab", "eng_Latn"
 MODEL_NAME = "facebook/nllb-200-distilled-1.3B"
-# Pinned Hugging Face commit so from_pretrained() always fetches the reviewed weights/code.
+# Pinned to the Hugging Face commit that was current as of 2026-11 (not audited), so
+# from_pretrained() always fetches the same files rather than whatever is latest.
 MODEL_REVISION = "7be3e24664b38ce1cac29b8aeed6911aa0cf0576"
 
 
