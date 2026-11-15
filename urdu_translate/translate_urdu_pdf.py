@@ -47,6 +47,8 @@ def tqdm(*args, **kwargs):
 
 SRC_LANG, TGT_LANG = "urd_Arab", "eng_Latn"
 MODEL_NAME = "facebook/nllb-200-distilled-1.3B"
+# Pinned Hugging Face commit so from_pretrained() always fetches the reviewed weights/code.
+MODEL_REVISION = "7be3e24664b38ce1cac29b8aeed6911aa0cf0576"
 
 
 @dataclass
@@ -159,9 +161,11 @@ def build_chunks(pages: list[list[str]], chunk_size: int) -> list[Chunk]:
 def load_translator(fp16: bool):
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
-    tok = AutoTokenizer.from_pretrained(MODEL_NAME, src_lang=SRC_LANG)
+    tok = AutoTokenizer.from_pretrained(
+        MODEL_NAME, revision=MODEL_REVISION, src_lang=SRC_LANG)
     model = AutoModelForSeq2SeqLM.from_pretrained(
-        MODEL_NAME, dtype=torch.float16 if fp16 else torch.float32
+        MODEL_NAME, revision=MODEL_REVISION,
+        dtype=torch.float16 if fp16 else torch.float32,
     ).to(DEVICE).eval()
     return tok, model
 
