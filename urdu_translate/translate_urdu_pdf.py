@@ -327,6 +327,9 @@ def parse_args():
                     help="Skip border cropping / spread splitting (OCR the raw page images)")
     ap.add_argument("--ltr", action="store_true",
                     help="Order split spreads left-to-right (default right-to-left, for Urdu)")
+    ap.add_argument("--sideways", choices=["cw", "ccw", "off"], default="cw",
+                    help="Scans fed in turned 90 degrees are detected and turned upright this way "
+                         "(default cw; 'off' disables rotation)")
     ap.add_argument("--save-pages", action="store_true",
                     help="Save each cropped/split page as a PNG in <pdf name>.pages/ beside the output")
     ap.add_argument("--save-ocr", action="store_true",
@@ -454,9 +457,11 @@ def process_pdf(pdf: Path, out: Path, a, translator) -> None:
             print(f"WARNING: expected {expected} pages but rendered {len(images)}", file=sys.stderr)
         if not a.no_prepare:
             save_dir = out.with_name(f"{pdf.stem}.pages") if a.save_pages else None
-            prepared = prepare_pages(images, a.first_page or 1, rtl=not a.ltr, save_dir=save_dir)
+            prepared = prepare_pages(images, a.first_page or 1, rtl=not a.ltr, save_dir=save_dir,
+                                     sideways=a.sideways)
+            turned = len({p.sheet for p in prepared if p.rotated})
             print(f"Prepared {len(images)} scans into {len(prepared)} pages (borders cropped, "
-                  f"spreads split)" + (f"; images in {save_dir}" if save_dir else ""))
+                  f"spreads split, {turned} sideways scans turned upright)" + (f"; images in {save_dir}" if save_dir else ""))
             images, labels = [p.image for p in prepared], [p.label for p in prepared]
         partial = cache.with_name(f"{pdf.stem}.ocr.partial.json") if cache else None
         pages = ocr_pdf(images, a.ocr_batch, a.first_page or 1, labels, partial)

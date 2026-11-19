@@ -12,7 +12,8 @@ import translate_urdu_pdf as t
 def _no_page_prep(monkeypatch):
     """These tests pass fake string 'images'; page splitting is covered in test_prep_and_quality."""
     monkeypatch.setattr(t, "prepare_pages", lambda imgs, *a, **k: [
-        SimpleNamespace(image=i, label=str(n)) for n, i in enumerate(imgs, 1)])
+        SimpleNamespace(image=i, label=str(n), sheet=n, rotated=False)
+        for n, i in enumerate(imgs, 1)])
 
 
 def line(text, y0, y1, x0=0, x1=100):

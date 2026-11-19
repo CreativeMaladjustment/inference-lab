@@ -157,3 +157,35 @@ def test_ocr_checkpoint_resumes_and_retries_oom(tmp_path, monkeypatch):
     assert calls[0] == ["b"]                           # did not redo page 1
     assert calls.count(["c"]) == 2                     # OOM retried once
     assert json.loads(ck.read_text()) == pages         # checkpoint kept up to date
+
+
+# ---- sideways scans ---------------------------------------------------------------
+def test_sideways_spread_is_turned_upright_and_split():
+    sideways = spread(800, 600).rotate(90, expand=True)    # fed in turned counter-clockwise
+    pages = pp.prepare_sheet(sideways, 4)                  # default: turn clockwise
+    assert [p.label for p in pages] == ["4 (right page)", "4 (left page)"]
+    assert all(p.rotated for p in pages)
+    assert all(p.image.height > p.image.width for p in pages)
+
+
+def test_upright_spread_not_rotated():
+    assert not any(p.rotated for p in pp.prepare_sheet(spread(), 1))
+
+
+def test_sideways_ccw_and_off():
+    img = spread(800, 600).rotate(-90, expand=True)         # needs a ccw turn to fix
+    assert all(p.rotated and p.image.height > p.image.width
+               for p in pp.prepare_sheet(img, 1, sideways="ccw"))
+    assert not any(p.rotated for p in pp.prepare_sheet(img, 1, sideways="off"))
+
+
+def test_wide_single_page_is_turned():
+    im = Image.new("L", (700, 500), 0)
+    ImageDraw.Draw(im).rectangle((40, 40, 660, 460), fill=255)    # one page lying on its side
+    (p,) = pp.prepare_sheet(im, 1)
+    assert p.rotated and p.image.height > p.image.width
+
+
+def test_unevenly_split_card_not_treated_as_sideways():
+    assert not pp.is_sideways([(0, 0, 400, 450)], [(0, 0, 260, 420), (270, 0, 446, 424)])
+    assert pp.is_sideways([(0, 0, 400, 450)], [(0, 0, 250, 420), (260, 0, 520, 424)])

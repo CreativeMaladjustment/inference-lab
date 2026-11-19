@@ -28,6 +28,7 @@ class PreparedPage:
     part: int            # 1-based position within the sheet, in reading order
     parts: int           # how many pages were found on the sheet
     label: str           # human-readable, e.g. "5 (right page)"
+    rotated: bool = False  # the scan was sideways and was turned upright
 
 
 def _paper_profile(mask: Image.Image, axis: str) -> list[float]:
@@ -75,10 +76,37 @@ def find_page_boxes(img: Image.Image) -> list[tuple[int, int, int, int]]:
     return boxes
 
 
-def prepare_sheet(img: Image.Image, sheet: int, rtl: bool = True, trim: int = 4) -> list[PreparedPage]:
+def _turn(img: Image.Image, direction: str) -> Image.Image:
+    return img.rotate(-90 if direction == "cw" else 90, expand=True)
+
+
+def is_sideways(boxes, rboxes) -> bool:
+    """Layout test for a scan that was fed in turned 90 degrees. Pages are portrait and
+    spreads are two side-by-side, so a scan is sideways if a single page box is wider than
+    tall, or if two pages only show up side by side after turning it."""
+    if len(boxes) == 1:
+        x0, y0, x1, y1 = boxes[0]
+        if (x1 - x0) > 1.1 * (y1 - y0):
+            return True
+    if len(boxes) <= 1 and len(rboxes) == 2:
+        w = sorted(b[2] - b[0] for b in rboxes)
+        return w[0] >= 0.75 * w[1]  # facing pages are about equally wide; a split card is not
+    return False
+
+
+def prepare_sheet(img: Image.Image, sheet: int, rtl: bool = True, trim: int = 4,
+                  sideways: str = "cw") -> list[PreparedPage]:
     """Split one scan into pages and trim borders. Falls back to the whole image if
-    no paper is found. `rtl` orders pages right-to-left (Urdu books)."""
-    boxes = find_page_boxes(img) or [(0, 0, img.width, img.height)]
+    no paper is found. `rtl` orders pages right-to-left (Urdu books). A sideways scan is
+    turned upright first, `sideways` = "cw" or "ccw" (the way to turn it; use "off" to skip)."""
+    boxes = find_page_boxes(img)
+    rotated = False
+    if sideways != "off":
+        turned = _turn(img, sideways)
+        rboxes = find_page_boxes(turned)
+        if is_sideways(boxes, rboxes):
+            img, boxes, rotated = turned, rboxes, True
+    boxes = boxes or [(0, 0, img.width, img.height)]
     if rtl:
         boxes = boxes[::-1]
     names = {1: [""], 2: [" (right page)", " (left page)"] if rtl else [" (left page)", " (right page)"]}
@@ -86,16 +114,16 @@ def prepare_sheet(img: Image.Image, sheet: int, rtl: bool = True, trim: int = 4)
     for i, (x0, y0, x1, y1) in enumerate(boxes, start=1):
         box = (x0 + trim, y0 + trim, max(x0 + trim + 1, x1 - trim), max(y0 + trim + 1, y1 - trim))
         suffix = names.get(len(boxes), [f" (part {j})" for j in range(1, len(boxes) + 1)])[i - 1]
-        pages.append(PreparedPage(img.crop(box), sheet, i, len(boxes), f"{sheet}{suffix}"))
+        pages.append(PreparedPage(img.crop(box), sheet, i, len(boxes), f"{sheet}{suffix}", rotated))
     return pages
 
 
 def prepare_pages(images, first_sheet: int = 1, rtl: bool = True,
-                  save_dir: Path | None = None) -> list[PreparedPage]:
+                  save_dir: Path | None = None, sideways: str = "cw") -> list[PreparedPage]:
     """prepare_sheet over every scan, optionally saving each page as a PNG for inspection."""
     out: list[PreparedPage] = []
     for n, img in enumerate(images, start=first_sheet):
-        out.extend(prepare_sheet(img, n, rtl))
+        out.extend(prepare_sheet(img, n, rtl, sideways=sideways))
     if save_dir:
         save_dir.mkdir(parents=True, exist_ok=True)
         for p in out:
