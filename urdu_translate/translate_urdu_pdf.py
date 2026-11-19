@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import faulthandler
+import gc
 import json
 import os
 import platform
@@ -114,16 +115,30 @@ def lines_to_paragraphs(lines, gap_factor: float = 1.0) -> list[str]:
 
 
 def ocr_pdf(images, ocr_batch: int, first_page: int = 1,
-            labels: list[str] | None = None) -> list[list[str]]:
+            labels: list[str] | None = None,
+            checkpoint: Path | None = None) -> list[list[str]]:
     """Returns pages -> paragraphs. Processes a few pages at a time to bound memory.
 
     Logs one line per page (via tqdm.write so the progress bar stays intact).
     """
     rec, det = load_ocr()
     pages: list[list[str]] = []
-    with tqdm(total=len(images), desc="OCR (Surya)", unit="page") as bar:
-        for i in range(0, len(images), ocr_batch):
-            preds = rec(images[i:i + ocr_batch], det_predictor=det)
+    if checkpoint and checkpoint.exists():  # resume after a crash (e.g. MPS out of memory)
+        pages = json.loads(checkpoint.read_text(encoding="utf-8"))[:len(images)]
+        print(f"Resuming OCR from checkpoint: {len(pages)} of {len(images)} pages already done")
+    with tqdm(total=len(images), initial=len(pages), desc="OCR (Surya)", unit="page") as bar:
+        for i in range(len(pages), len(images), ocr_batch):
+            try:
+                preds = rec(images[i:i + ocr_batch], det_predictor=det)
+            except RuntimeError as exc:
+                if "out of memory" not in str(exc):
+                    raise
+                print(f"GPU out of memory at page {i + 1}; clearing caches and retrying once",
+                      file=sys.stderr)
+                gc.collect()
+                if DEVICE.type == "mps":
+                    torch.mps.empty_cache()
+                preds = rec(images[i:i + ocr_batch], det_predictor=det)
             for p in preds:
                 paras = lines_to_paragraphs(p.text_lines)
                 pages.append(paras)
@@ -133,8 +148,17 @@ def ocr_pdf(images, ocr_batch: int, first_page: int = 1,
                 _tqdm.write(f"  OCR page {num}: {len(p.text_lines)} lines, "
                             f"{len(paras)} paragraphs, {chars} chars{note}", file=sys.stdout)
                 bar.update(1)
+            if checkpoint:
+                checkpoint.write_text(json.dumps(pages, ensure_ascii=False), encoding="utf-8")
+            gc.collect()
             if DEVICE.type == "mps":
                 torch.mps.empty_cache()
+    # Release Surya before the 1.3B translation model loads: on MPS it otherwise keeps
+    # tens of GB resident and loading NLLB fails with "MPS backend out of memory".
+    del rec, det
+    gc.collect()
+    if DEVICE.type == "mps":
+        torch.mps.empty_cache()
     return pages
 
 
@@ -434,8 +458,11 @@ def process_pdf(pdf: Path, out: Path, a, translator) -> None:
             print(f"Prepared {len(images)} scans into {len(prepared)} pages (borders cropped, "
                   f"spreads split)" + (f"; images in {save_dir}" if save_dir else ""))
             images, labels = [p.image for p in prepared], [p.label for p in prepared]
-        pages = ocr_pdf(images, a.ocr_batch, a.first_page or 1, labels)
+        partial = cache.with_name(f"{pdf.stem}.ocr.partial.json") if cache else None
+        pages = ocr_pdf(images, a.ocr_batch, a.first_page or 1, labels, partial)
         del images
+        if partial:
+            partial.unlink(missing_ok=True)
         if cache:
             cache.write_text(json.dumps(pages, ensure_ascii=False, indent=1), encoding="utf-8")
             if labels:

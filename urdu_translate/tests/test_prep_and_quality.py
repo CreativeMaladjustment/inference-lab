@@ -129,3 +129,31 @@ def test_assemble_uses_labels_and_marks_placeholders():
                              labels=["5 (right page)", "5 (left page)"])
     assert "## Page 5 (right page) of x.pdf" in md and "## Page 5 (left page) of x.pdf" in md
     assert "*[illegible]*" in md
+
+
+# ---- OCR checkpoint / resume ---------------------------------------------------
+def test_ocr_checkpoint_resumes_and_retries_oom(tmp_path, monkeypatch):
+    import json
+    calls = []
+
+    class Pred:
+        def __init__(self, txt):
+            self.text_lines = [SimpleNamespace(text=txt, bbox=(0, 0, 10, 10))]
+
+    state = {"boom": True}
+
+    def rec(imgs, det_predictor):
+        calls.append(list(imgs))
+        if imgs == ["c"] and state["boom"]:
+            state["boom"] = False
+            raise RuntimeError("MPS backend out of memory")
+        return [Pred(f"txt-{i}") for i in imgs]
+
+    monkeypatch.setattr(t, "load_ocr", lambda: (rec, None))
+    ck = tmp_path / "x.partial.json"
+    ck.write_text(json.dumps([["txt-a"]]))            # page 1 already done
+    pages = t.ocr_pdf(["a", "b", "c"], ocr_batch=1, checkpoint=ck)
+    assert pages == [["txt-a"], ["txt-b"], ["txt-c"]]
+    assert calls[0] == ["b"]                           # did not redo page 1
+    assert calls.count(["c"]) == 2                     # OOM retried once
+    assert json.loads(ck.read_text()) == pages         # checkpoint kept up to date
