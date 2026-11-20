@@ -1,0 +1,6 @@
+# Local vision models (vision_translate.py --provider mlx). Apple Silicon only.
+# Use a SEPARATE venv from requirements.txt: mlx-vlm needs transformers 5.x, while the
+# Surya/NLLB pipeline pins transformers 4.56.1.
+#   python3.13 -m venv .venv-vision && .venv-vision/bin/pip install -r requirements-vision-local.txt
+mlx-vlm==0.8.0
+pillow
