@@ -86,6 +86,10 @@ RESPONSE_SCHEMA = {
     "required": ["legibility", "printed_page_number", "translation", "notes"],
 }
 
+TILE_NOTE = ("This image is one horizontal strip cut from a larger page, so it may start or end "
+             "partway through a paragraph or table. Translate only what is visible in the strip; "
+             "do not comment on what is missing, and do not repeat anything.")
+
 UNRELIABLE = "[translation unreliable]"
 ILLEGIBLE = "[illegible]"
 
@@ -99,13 +103,13 @@ class GeminiProvider:
 
         self.model, self._client = model, genai.Client(api_key=api_key)
 
-    def translate(self, image: bytes, mime: str, temperature: float = 0.0) -> str:
+    def translate(self, image: bytes, mime: str, temperature: float = 0.0, note: str = "") -> str:
         from google.genai import types
 
         resp = self._client.models.generate_content(
             model=self.model,
             contents=[types.Part.from_bytes(data=image, mime_type=mime),
-                      "Translate this page following the rules."],
+                      ("Translate this page following the rules. " + note).strip()],
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT + JSON_FORMAT,
                 temperature=temperature,
@@ -165,14 +169,15 @@ class MlxProvider:
         self.model, self.processor = load(model)
         self.config = load_config(model)
 
-    def translate(self, image: bytes, mime: str, temperature: float = 0.0) -> str:
+    def translate(self, image: bytes, mime: str, temperature: float = 0.0, note: str = "") -> str:
         import tempfile
 
         from mlx_vlm import generate
         from mlx_vlm.prompt_utils import apply_chat_template
 
         prompt = apply_chat_template(self.processor, self.config,
-                                     SYSTEM_PROMPT + "\n" + TAGGED_FORMAT, num_images=1)
+                                     SYSTEM_PROMPT + ("\n" + note if note else "") + "\n" + TAGGED_FORMAT,
+                                     num_images=1)
         with tempfile.NamedTemporaryFile(suffix=".png") as tmp:
             tmp.write(image)
             tmp.flush()
@@ -217,6 +222,64 @@ def image_bytes(path: Path, max_side: int) -> tuple[bytes, str]:
 
 
 # ----------------------------------------------------------------- result handling
+def tile_cuts(img, n: int) -> list[int]:
+    """Row positions (including 0 and the height) that cut the page into n strips. Each cut
+    is moved to the emptiest nearby row (a gap between text lines) so no line is split."""
+    g = img.convert("L")
+    w, h = g.size
+    if n <= 1 or h < n * 40:
+        return [0, h]
+    ink = [v / 255 for v in g.point(lambda p: 0 if p > 128 else 255).resize((1, h)).getdata()]
+    smooth = [sum(ink[max(0, i - 2): i + 3]) / len(ink[max(0, i - 2): i + 3]) for i in range(h)]
+    cuts = [0]
+    for k in range(1, n):
+        target, win = round(k * h / n), max(5, h // (4 * n))
+        lo, hi = max(cuts[-1] + 20, target - win), min(h - 20, target + win)
+        cuts.append(min(range(lo, hi + 1), key=lambda r: (smooth[r], abs(r - target))) if lo < hi else target)
+    return cuts + [h]
+
+
+def tiles_of(path: Path, n: int, max_side: int) -> list[tuple[bytes, str]]:
+    """The page as n horizontal strips (or the whole page for n=1), PNG-encoded."""
+    from PIL import Image
+
+    img = Image.open(path)
+    if n <= 1:
+        return [image_bytes(path, max_side)]
+    cuts = tile_cuts(img, n)
+    out = []
+    for a, b in zip(cuts, cuts[1:]):
+        strip = img.crop((0, a, img.width, b)).convert("L")
+        if max(strip.size) > max_side:
+            scale = max_side / max(strip.size)
+            strip = strip.resize((round(strip.width * scale), round(strip.height * scale)), Image.LANCZOS)
+        buf = io.BytesIO()
+        strip.save(buf, format="PNG", optimize=True)
+        out.append((buf.getvalue(), "image/png"))
+    return out
+
+
+def merge_tiles(results: list[dict]) -> dict:
+    """Combine per-strip results into one page result. A strip that stayed stuck is replaced
+    by [translation unreliable] so the rest of the page is still kept."""
+    legs = [r["legibility"] for r in results]
+    texts = [UNRELIABLE if r.get("flag") == "stuck" else r["translation"] for r in results]
+    bad = [r.get("flag") == "stuck" or r["legibility"] == "illegible" for r in results]
+    if all(l == "illegible" for l in legs):
+        leg = "illegible"
+    elif all(l == "clear" for l in legs) and not any(bad):
+        leg = "clear"
+    else:
+        leg = "partial"
+    page = next((r["printed_page_number"] for r in results if r["printed_page_number"]), "")
+    notes = "; ".join(dict.fromkeys(r["notes"] for r in results if r["notes"]))
+    merged = {"legibility": leg, "printed_page_number": page,
+              "translation": "\n\n".join(t for t in texts if t), "notes": notes}
+    if all(r.get("flag") == "stuck" for r in results):
+        merged["flag"] = "stuck"
+    return merged
+
+
 def parse_result(text: str) -> dict:
     """Validate the model's JSON. Raises ValueError if it isn't the expected shape."""
     try:
@@ -241,27 +304,41 @@ def looks_stuck(text: str) -> bool:
 
 
 def translate_page(provider, path: Path, max_side: int, retries: int = 4,
-                   sleep=time.sleep) -> dict:
-    """One page -> validated result dict. Retries API errors with backoff, and retries a
+                   sleep=time.sleep, tiles: int = 1) -> dict:
+    """One page -> validated result dict. With tiles > 1 the page is cut into that many
+    horizontal strips, each translated on its own, then merged in order."""
+    parts = tiles_of(path, tiles, max_side)
+    if len(parts) == 1:
+        return translate_image(provider, path.name, *parts[0], retries=retries, sleep=sleep)
+    results = []
+    for i, (img, mime) in enumerate(parts, start=1):
+        results.append(translate_image(provider, f"{path.name} strip {i}/{len(parts)}", img, mime,
+                                       retries=retries, sleep=sleep, note=TILE_NOTE))
+    return merge_tiles(results)
+
+
+def translate_image(provider, name: str, img: bytes, mime: str, retries: int = 4,
+                    sleep=time.sleep, note: str = "") -> dict:
+    """One image -> validated result dict. Retries API errors with backoff, and retries a
     repeating/stuck translation once at a higher temperature before flagging it."""
-    img, mime = image_bytes(path, max_side)
     temperature, stuck_retried, attempt = 0.0, False, 0
+    kwargs = {"note": note} if note else {}
     while True:
         try:
-            result = parse_result(provider.translate(img, mime, temperature))
+            result = parse_result(provider.translate(img, mime, temperature, **kwargs))
         except Exception as exc:  # API error, rate limit, or malformed JSON
             attempt += 1
             if attempt > retries:
                 raise
             wait = min(60, 2 ** attempt)
-            print(f"  {path.name}: {type(exc).__name__}: {str(exc)[:120]} "
+            print(f"  {name}: {type(exc).__name__}: {str(exc)[:120]} "
                   f"(retry {attempt}/{retries} in {wait}s)", file=sys.stderr)
             sleep(wait)
             continue
         if result["translation"] and looks_stuck(result["translation"]):
             if not stuck_retried:
                 stuck_retried, temperature = True, 0.4
-                print(f"  {path.name}: repeating output, retrying once", file=sys.stderr)
+                print(f"  {name}: repeating output, retrying once", file=sys.stderr)
                 continue
             result["flag"] = "stuck"
         return result
@@ -297,7 +374,7 @@ def load_cache(path: Path) -> dict[str, dict]:
 
 
 def run(files: list[Path], labels: list[str], provider, out: Path, *, max_side: int,
-        delay: float, source_name: str, sleep=time.sleep) -> list[str]:
+        delay: float, source_name: str, sleep=time.sleep, tiles: int = 1) -> list[str]:
     """Translate each page (using/updating the jsonl cache), write the Markdown, and
     return the names of pages that failed."""
     cache_path = out.with_name(out.name + ".jsonl")
@@ -308,7 +385,7 @@ def run(files: list[Path], labels: list[str], provider, out: Path, *, max_side: 
             if f.name in cache and "error" not in cache[f.name]:
                 continue
             try:
-                rec = {"file": f.name, "label": label, "result": translate_page(provider, f, max_side)}
+                rec = {"file": f.name, "label": label, "result": translate_page(provider, f, max_side, tiles=tiles)}
             except Exception as exc:
                 rec = {"file": f.name, "label": label, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
                 failed.append(f.name)
@@ -342,6 +419,9 @@ def parse_args(argv=None):
     ap.add_argument("--skip", type=int, default=0, help="Skip the first N page images")
     ap.add_argument("--max-side", type=int, default=2200, help="Downscale images whose longest side exceeds this")
     ap.add_argument("--delay", type=float, default=0.5, help="Seconds to wait between requests")
+    ap.add_argument("--tiles", type=int, default=1,
+                    help="Cut each page into this many horizontal strips (cut between text lines) and "
+                         "translate each separately; helps models that loop on dense pages")
     ap.add_argument("--dry-run", action="store_true", help="List what would be sent; make no API calls")
     return ap.parse_args(argv)
 
@@ -386,7 +466,7 @@ def main(argv=None):
             sys.exit("Give --model (or set GEMINI_MODEL); run --list-models to see what your key can use.")
         provider = GeminiProvider(model, get_api_key())
     print(f"{len(files)} pages with {a.provider}:{a.model or model} -> {out}")
-    failed = run(files, labels, provider, out, max_side=a.max_side, delay=a.delay,
+    failed = run(files, labels, provider, out, max_side=a.max_side, delay=a.delay, tiles=a.tiles,
                  source_name=a.pages.name.removesuffix(".pages"))
     print(f"Wrote {out}" + (f"; {len(failed)} pages failed: {', '.join(failed)}" if failed else ""))
     if failed:

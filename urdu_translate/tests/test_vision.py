@@ -20,8 +20,9 @@ class Fake:
     def __init__(self, replies):
         self.replies, self.calls = list(replies), []
 
-    def translate(self, image, mime, temperature=0.0):
+    def translate(self, image, mime, temperature=0.0, note=""):
         self.calls.append(temperature)
+        self.notes = getattr(self, "notes", []) + [note]
         r = self.replies.pop(0)
         if isinstance(r, Exception):
             raise r
@@ -151,3 +152,56 @@ def test_mlx_provider_requires_model(tmp_path, monkeypatch):
     pages = tmp_path / "b.pages"; pages.mkdir(); png(pages / "sheet001-1.png")
     with pytest.raises(SystemExit, match="Hugging Face"):
         v.main([str(pages), "--provider", "mlx"])
+
+
+# ---- tiling -------------------------------------------------------------------------
+def lined_page(tmp_path, lines=12, gap=40, w=300):
+    """White page with a dark text 'line' every `gap` px."""
+    from PIL import ImageDraw
+    h = lines * gap + gap
+    im = Image.new("L", (w, h), 255)
+    d = ImageDraw.Draw(im)
+    for i in range(lines):
+        y = gap // 2 + i * gap
+        d.rectangle((20, y, w - 20, y + 14), fill=0)
+    p = tmp_path / "sheet001-1.png"; im.save(p)
+    return im, p
+
+
+def test_tile_cuts_land_in_gaps_between_lines(tmp_path):
+    im, _ = lined_page(tmp_path)
+    cuts = v.tile_cuts(im, 4)
+    assert cuts[0] == 0 and cuts[-1] == im.height and len(cuts) == 5
+    px = im.load()
+    for c in cuts[1:-1]:
+        assert all(px[x, c] == 255 for x in range(20, 280))     # cut row has no ink
+
+
+def test_tile_cuts_small_or_single():
+    assert v.tile_cuts(Image.new("L", (100, 30), 255), 4) == [0, 30]
+    assert v.tile_cuts(Image.new("L", (100, 500), 255), 1) == [0, 500]
+
+
+def test_tiled_page_translates_each_strip_and_merges(tmp_path):
+    _, p = lined_page(tmp_path)
+    fake = Fake([ok("Top.", page="5"), ok("Middle.", leg="partial"), ok("Bottom.")])
+    r = v.translate_page(fake, p, 2000, sleep=NOSLEEP, tiles=3)
+    assert r["translation"] == "Top.\n\nMiddle.\n\nBottom."
+    assert r["legibility"] == "partial" and r["printed_page_number"] == "5"
+    assert all("horizontal strip" in n for n in fake.notes)
+
+
+def test_stuck_strip_is_marked_but_rest_of_page_kept(tmp_path):
+    _, p = lined_page(tmp_path)
+    loop = ok("nom nom nom nom nom nom nom nom")
+    fake = Fake([ok("Top."), loop, loop, ok("Bottom.")])
+    r = v.translate_page(fake, p, 2000, sleep=NOSLEEP, tiles=3)
+    assert r["translation"] == "Top.\n\n" + v.UNRELIABLE + "\n\nBottom."
+    assert r["legibility"] == "partial" and "flag" not in r
+
+
+def test_all_strips_illegible_or_stuck():
+    ill = {"legibility": "illegible", "printed_page_number": "", "translation": "", "notes": ""}
+    assert v.merge_tiles([ill, ill])["legibility"] == "illegible"
+    stuck = {**ill, "legibility": "clear", "translation": "x", "flag": "stuck"}
+    assert v.merge_tiles([stuck, stuck])["flag"] == "stuck"
