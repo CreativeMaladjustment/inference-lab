@@ -1,0 +1,4 @@
+# Extra dependencies for vision_translate.py only (Gemini). Install into the same venv:
+#   pip install -r requirements-vision.txt
+# Kept separate from requirements.txt so the Surya/NLLB pins are unaffected.
+google-genai==3.6.1

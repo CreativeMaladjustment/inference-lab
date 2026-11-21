@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Urdu PDF -> English Markdown: pdf2image -> Surya OCR -> chunking -> NLLB-200 -> .md
+"""Urdu PDF -> English Markdown: pdf2image -> split spreads/crop borders -> Surya OCR
+-> chunking -> NLLB-200 -> .md
 
 Usage: python translate_urdu_pdf.py input.pdf [-o output.md]
 """
@@ -7,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import faulthandler
+import gc
 import json
 import os
 import platform
@@ -37,6 +39,8 @@ def get_device() -> torch.device:
 DEVICE = get_device()
 
 from pdf2image import convert_from_path  # noqa: E402
+from page_prep import prepare_pages  # noqa: E402
+from text_quality import ILLEGIBLE, UNRELIABLE, is_illegible_source, translation_unreliable  # noqa: E402
 from tqdm import tqdm as _tqdm  # noqa: E402
 
 
@@ -47,6 +51,9 @@ def tqdm(*args, **kwargs):
 
 SRC_LANG, TGT_LANG = "urd_Arab", "eng_Latn"
 MODEL_NAME = "facebook/nllb-200-distilled-1.3B"
+# Pinned to the Hugging Face commit that was current as of 2026-11 (not audited), so
+# from_pretrained() always fetches the same files rather than whatever is latest.
+MODEL_REVISION = "7be3e24664b38ce1cac29b8aeed6911aa0cf0576"
 
 
 @dataclass
@@ -107,27 +114,51 @@ def lines_to_paragraphs(lines, gap_factor: float = 1.0) -> list[str]:
     return paras
 
 
-def ocr_pdf(images, ocr_batch: int, first_page: int = 1) -> list[list[str]]:
+def ocr_pdf(images, ocr_batch: int, first_page: int = 1,
+            labels: list[str] | None = None,
+            checkpoint: Path | None = None) -> list[list[str]]:
     """Returns pages -> paragraphs. Processes a few pages at a time to bound memory.
 
     Logs one line per page (via tqdm.write so the progress bar stays intact).
     """
     rec, det = load_ocr()
     pages: list[list[str]] = []
-    with tqdm(total=len(images), desc="OCR (Surya)", unit="page") as bar:
-        for i in range(0, len(images), ocr_batch):
-            preds = rec(images[i:i + ocr_batch], det_predictor=det)
+    if checkpoint and checkpoint.exists():  # resume after a crash (e.g. MPS out of memory)
+        pages = json.loads(checkpoint.read_text(encoding="utf-8"))[:len(images)]
+        print(f"Resuming OCR from checkpoint: {len(pages)} of {len(images)} pages already done")
+    with tqdm(total=len(images), initial=len(pages), desc="OCR (Surya)", unit="page") as bar:
+        for i in range(len(pages), len(images), ocr_batch):
+            try:
+                preds = rec(images[i:i + ocr_batch], det_predictor=det)
+            except RuntimeError as exc:
+                if "out of memory" not in str(exc):
+                    raise
+                print(f"GPU out of memory at page {i + 1}; clearing caches and retrying once",
+                      file=sys.stderr)
+                gc.collect()
+                if DEVICE.type == "mps":
+                    torch.mps.empty_cache()
+                preds = rec(images[i:i + ocr_batch], det_predictor=det)
             for p in preds:
                 paras = lines_to_paragraphs(p.text_lines)
                 pages.append(paras)
-                num = first_page + len(pages) - 1
+                num = labels[len(pages) - 1] if labels else first_page + len(pages) - 1
                 chars = sum(len(x) for x in paras)
                 note = "" if paras else "  (no text detected)"
                 _tqdm.write(f"  OCR page {num}: {len(p.text_lines)} lines, "
                             f"{len(paras)} paragraphs, {chars} chars{note}", file=sys.stdout)
                 bar.update(1)
+            if checkpoint:
+                checkpoint.write_text(json.dumps(pages, ensure_ascii=False), encoding="utf-8")
+            gc.collect()
             if DEVICE.type == "mps":
                 torch.mps.empty_cache()
+    # Release Surya before the 1.3B translation model loads: on MPS it otherwise keeps
+    # tens of GB resident and loading NLLB fails with "MPS backend out of memory".
+    del rec, det
+    gc.collect()
+    if DEVICE.type == "mps":
+        torch.mps.empty_cache()
     return pages
 
 
@@ -159,9 +190,11 @@ def build_chunks(pages: list[list[str]], chunk_size: int) -> list[Chunk]:
 def load_translator(fp16: bool):
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
-    tok = AutoTokenizer.from_pretrained(MODEL_NAME, src_lang=SRC_LANG)
+    tok = AutoTokenizer.from_pretrained(
+        MODEL_NAME, revision=MODEL_REVISION, src_lang=SRC_LANG)
     model = AutoModelForSeq2SeqLM.from_pretrained(
-        MODEL_NAME, dtype=torch.float16 if fp16 else torch.float32
+        MODEL_NAME, revision=MODEL_REVISION,
+        dtype=torch.float16 if fp16 else torch.float32,
     ).to(DEVICE).eval()
     return tok, model
 
@@ -170,10 +203,17 @@ def load_translator(fp16: bool):
 def translate_chunks(chunks: list[Chunk], tok, model, batch_size: int,
                      max_input_tokens: int, num_beams: int) -> list[str]:
     out = [""] * len(chunks)
+    # NLLB invents fluent English from noise, so never feed it OCR garbage.
+    skipped = 0
+    for i, c in enumerate(chunks):
+        if is_illegible_source(c.text):
+            out[i], skipped = ILLEGIBLE, skipped + 1
     # Sort by length so batches have little padding; restore order via index.
-    order = sorted(range(len(chunks)), key=lambda i: len(chunks[i].text))
+    order = sorted((i for i in range(len(chunks)) if out[i] != ILLEGIBLE),
+                   key=lambda i: len(chunks[i].text))
+    flagged = 0
     bos = tok.convert_tokens_to_ids(TGT_LANG)
-    with tqdm(total=len(chunks), desc="Translating (NLLB)", unit="chunk") as bar:
+    with tqdm(total=len(order), desc="Translating (NLLB)", unit="chunk") as bar:
         for s in range(0, len(order), batch_size):
             idx = order[s:s + batch_size]
             enc = tok([chunks[i].text for i in idx], return_tensors="pt", padding=True,
@@ -186,16 +226,29 @@ def translate_chunks(chunks: list[Chunk], tok, model, batch_size: int,
                 no_repeat_ngram_size=4,
             )
             for i, text in zip(idx, tok.batch_decode(gen, skip_special_tokens=True)):
-                out[i] = text.strip()
+                text = text.strip()
+                if translation_unreliable(chunks[i].text, text):
+                    text, flagged = UNRELIABLE, flagged + 1
+                out[i] = text
             bar.update(len(idx))
             if DEVICE.type == "mps":
                 torch.mps.empty_cache()
+    print(f"Quality checks: {skipped} of {len(chunks)} chunks skipped as illegible OCR, "
+          f"{flagged} translations flagged unreliable")
     return out
 
 
 # ----------------------------------------------------------------- 4. Reassembly
+def _mark_placeholders(text: str) -> str:
+    """Italicise [illegible]/[translation unreliable] so they stand out from translation."""
+    for ph in (ILLEGIBLE, UNRELIABLE):
+        text = text.replace(ph, f"*{ph}*")
+    return text
+
+
 def assemble_markdown(num_pages: int, first_page: int, chunks: list[Chunk],
-                      translations: list[str], source_name: str) -> str:
+                      translations: list[str], source_name: str,
+                      labels: list[str] | None = None) -> str:
     # (page, para) -> joined chunk translations, in original order
     paras: dict[tuple[int, int], list[str]] = {}
     for c, t in zip(chunks, translations):
@@ -203,10 +256,11 @@ def assemble_markdown(num_pages: int, first_page: int, chunks: list[Chunk],
 
     parts = [f"# Translation of {source_name}\n"]
     for p in range(num_pages):
-        parts.append(f"## Page {first_page + p} of {source_name}")
+        label = labels[p] if labels and p < len(labels) else str(first_page + p)
+        parts.append(f"## Page {label} of {source_name}")
         keys = sorted(k for k in paras if k[0] == p)
         if keys:
-            parts.extend(" ".join(paras[k]) for k in keys)
+            parts.extend(_mark_placeholders(" ".join(paras[k])) for k in keys)
         else:
             parts.append("*[No text detected on this page]*")
         if p < num_pages - 1:
@@ -269,6 +323,15 @@ def parse_args():
                     help="Also render the Markdown to <pdf name>.en.pdf (needs weasyprint + pango)")
     ap.add_argument("--log-file", type=Path,
                     help="Log file (default: urdu_translate-<timestamp>.log in the output folder)")
+    ap.add_argument("--no-prepare", action="store_true",
+                    help="Skip border cropping / spread splitting (OCR the raw page images)")
+    ap.add_argument("--ltr", action="store_true",
+                    help="Order split spreads left-to-right (default right-to-left, for Urdu)")
+    ap.add_argument("--sideways", choices=["cw", "ccw", "off"], default="cw",
+                    help="Scans fed in turned 90 degrees are detected and turned upright this way "
+                         "(default cw; 'off' disables rotation)")
+    ap.add_argument("--save-pages", action="store_true",
+                    help="Save each cropped/split page as a PNG in <pdf name>.pages/ beside the output")
     ap.add_argument("--save-ocr", action="store_true",
                     help="Cache OCR text as <pdf name>.ocr.json beside the output (reused if present)")
     return ap.parse_args()
@@ -374,8 +437,12 @@ def output_path_for(pdf: Path, a) -> Path:
 
 def process_pdf(pdf: Path, out: Path, a, translator) -> None:
     cache = out.with_name(f"{pdf.stem}.ocr.json") if a.save_ocr else None
+    labels_cache = cache.with_name(f"{pdf.stem}.ocr.labels.json") if cache else None
+    labels: list[str] | None = None
     if cache and cache.exists():
         pages = json.loads(cache.read_text(encoding="utf-8"))
+        if labels_cache.exists():
+            labels = json.loads(labels_cache.read_text(encoding="utf-8"))
         print(f"Loaded cached OCR: {len(pages)} pages")
     else:
         total = pdf_page_count(pdf)
@@ -388,17 +455,30 @@ def process_pdf(pdf: Path, out: Path, a, translator) -> None:
         print(f"Rendered {len(images)} pages at {a.dpi} DPI")
         if expected is not None and len(images) != expected:
             print(f"WARNING: expected {expected} pages but rendered {len(images)}", file=sys.stderr)
-        pages = ocr_pdf(images, a.ocr_batch, a.first_page or 1)
+        if not a.no_prepare:
+            save_dir = out.with_name(f"{pdf.stem}.pages") if a.save_pages else None
+            prepared = prepare_pages(images, a.first_page or 1, rtl=not a.ltr, save_dir=save_dir,
+                                     sideways=a.sideways)
+            turned = len({p.sheet for p in prepared if p.rotated})
+            print(f"Prepared {len(images)} scans into {len(prepared)} pages (borders cropped, "
+                  f"spreads split, {turned} sideways scans turned upright)" + (f"; images in {save_dir}" if save_dir else ""))
+            images, labels = [p.image for p in prepared], [p.label for p in prepared]
+        partial = cache.with_name(f"{pdf.stem}.ocr.partial.json") if cache else None
+        pages = ocr_pdf(images, a.ocr_batch, a.first_page or 1, labels, partial)
         del images
+        if partial:
+            partial.unlink(missing_ok=True)
         if cache:
             cache.write_text(json.dumps(pages, ensure_ascii=False, indent=1), encoding="utf-8")
+            if labels:
+                labels_cache.write_text(json.dumps(labels, ensure_ascii=False), encoding="utf-8")
 
     chunks = build_chunks(pages, a.chunk_size)
     print(f"{len(chunks)} chunks from {len(pages)} pages")
     tok, model = translator()
     translations = translate_chunks(chunks, tok, model, a.batch_size, a.max_input_tokens, a.beams)
     out.write_text(
-        assemble_markdown(len(pages), a.first_page or 1, chunks, translations, pdf.name),
+        assemble_markdown(len(pages), a.first_page or 1, chunks, translations, pdf.name, labels),
         encoding="utf-8")
     print(f"Wrote {out}")
     if a.to_pdf:
