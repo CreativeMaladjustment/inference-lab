@@ -25,6 +25,7 @@ import os
 import re
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 from text_quality import is_degenerate
@@ -296,9 +297,28 @@ def parse_result(text: str) -> dict:
     }
 
 
+MAX_STRIP_CHARS = 5000   # a page strip never holds this much text; a longer answer ran to the token cap
+
+
 def looks_stuck(text: str) -> bool:
     """Repetition check for the model's translation. Tokens with no letters or digits (the
-    ditto marks and rules in a catalog table) are ignored so tables don't trip it."""
+    ditto marks and rules in a catalog table) are ignored for the word checks so tables
+    don't trip it, but long runs of them (a model looping on '...') still count."""
+    if len(text) > MAX_STRIP_CHARS:
+        return True
+    if re.search(r"[.\-_=*~]{40,}", text):                    # a long run of dots/dashes
+        return True
+    marks = [w for w in text.split() if not re.search(r"\w", w)]
+    run = best = 0
+    for a, b in zip(marks, marks[1:]):
+        run = run + 1 if a == b else 0
+        best = max(best, run)
+    if best >= 20:                                              # '... ... ...' 20+ times
+        return True
+    starts = Counter(" ".join(re.findall(r"\w+", s.lower())[:5])
+                     for s in re.split(r"(?<=[.!?])\s+|\n+", text) if len(re.findall(r"\w+", s)) >= 5)
+    if starts and starts.most_common(1)[0][1] >= 5:            # same sentence opening, reworded
+        return True
     words = [w for w in text.split() if re.search(r"\w", w)]
     return is_degenerate(" ".join(words))
 

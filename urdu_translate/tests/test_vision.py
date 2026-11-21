@@ -205,3 +205,17 @@ def test_all_strips_illegible_or_stuck():
     assert v.merge_tiles([ill, ill])["legibility"] == "illegible"
     stuck = {**ill, "legibility": "clear", "translation": "x", "flag": "stuck"}
     assert v.merge_tiles([stuck, stuck])["flag"] == "stuck"
+
+
+def test_looks_stuck_catches_dot_loops_and_reworded_loops():
+    assert v.looks_stuck("[unclear] " + "... " * 60)
+    assert v.looks_stuck("." * 200)
+    assert v.looks_stuck("word " * 1200 + "x")
+    reworded = " ".join(f"The author has provided a {w} explanation of the subject matter."
+                        for w in ["detailed", "clear", "brief", "full", "short", "good"])
+    assert v.looks_stuck(reworded)
+
+
+def test_looks_stuck_allows_catalog_ditto_marks():
+    table = "\n".join(f"{n}. Book {n} ... 18{40+n}, Delhi, 12 pp. \" \" \"" for n in range(1, 8))
+    assert not v.looks_stuck(table)
